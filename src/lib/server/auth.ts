@@ -1,9 +1,13 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import type { OrgUnit, PlatformRole, PublicUser, Session, User } from "./domain";
 import { withoutSecrets } from "./domain";
 import { appendAudit } from "./audit";
 import { hashPassword, id, secureToken, verifyPassword } from "./security";
 import { mutateDatabase, readDatabase } from "./store";
+import { csrfMatches, scopeFromPrincipal } from "./db/postgres";
+import { toStorageId } from "./db/ids";
+import type { ActorScope, OsaPersistence, SessionRef } from "./db/repository";
 
 export { SESSION_COOKIE } from "./session-cookie";
 import { SESSION_COOKIE } from "./session-cookie";
@@ -42,6 +46,127 @@ function clearThrottle(key: string): void {
 /** Same scrypt cost as a real credential, so a failed lookup is indistinguishable. */
 const DECOY_PASSWORD_HASH = hashPassword("decoy-credential-never-matches");
 
+/* ---------------------------------------------------------------------------
+ * The datastore seam
+ *
+ * `DATABASE_URL` decides which datastore is authoritative, and the two are
+ * never both consulted for one request: when it is set PostgreSQL is the system
+ * of record and nothing below reaches `store.ts`; when it is absent the JSON
+ * store serves local development and the unit suite exactly as before.
+ *
+ * `persistence.ts` is imported lazily, and only after the environment switch
+ * has already been read. That is deliberate: it imports "server-only", which
+ * throws under a plain Node module loader, so a static import here would take
+ * every JSON-path unit test down with it. The lazy import also keeps the whole
+ * PostgreSQL adapter out of the JSON path's module graph.
+ * ------------------------------------------------------------------------- */
+
+async function postgres(): Promise<OsaPersistence | null> {
+  if (!process.env.DATABASE_URL) return null;
+  const { postgresConfigured, requirePersistence } = await import("./persistence");
+  return postgresConfigured() ? requirePersistence() : null;
+}
+
+/**
+ * The actor context for a transaction that has not yet authenticated anybody.
+ *
+ * `withTenantTransaction` requires `app.user_id` to be a uuid, and the email
+ * lookup at login runs before a user exists. No RLS policy in `001` reads
+ * `app.user_id` — every policy is `tenant_id = osa.current_tenant_id()` — so
+ * the nil uuid is an honest "no actor established", not a widened scope. The
+ * tenant context is real and is what confines the query.
+ */
+const NIL_ACTOR = "00000000-0000-0000-0000-000000000000";
+
+/** Tenant-scoped, actor-less: enough for `findUserByEmail` and a failure audit. */
+function preAuthScope(tenantId: string): ActorScope {
+  return { tenantId: toStorageId(tenantId), userId: NIL_ACTOR, orgScopes: [], viewerOrgPath: "", selfOnly: false };
+}
+
+/**
+ * The scope for the session and audit writes belonging to one authenticated
+ * user. `osa.sessions` and `osa.audit_events` are keyed on tenant and user
+ * alone, so `orgScopes` / `viewerOrgPath` are not read on this path;
+ * `viewerOrgPath` is the delegated root because neither `findUserByEmail` nor
+ * `loadPrincipal` returns the user's own org-unit path, and adding that to
+ * `OsaRepository` is a change to a file this work does not own.
+ */
+function actorScope(user: User): ActorScope {
+  return scopeFromPrincipal({
+    tenantId: user.tenantId,
+    user: { id: user.id, orgUnitId: user.orgUnitId },
+    delegatedOrgPaths: user.delegatedOrgPaths,
+    selfOnly: !user.roles.some((role) => BROAD_SCOPE_ROLES.includes(role)),
+    viewerOrgPath: user.delegatedOrgPaths[0] ?? "",
+  });
+}
+
+/** A resolved session, before the principal behind it has been loaded. */
+function sessionScope(reference: SessionRef): ActorScope {
+  return { tenantId: reference.tenantId, userId: reference.userId, orgScopes: [], viewerOrgPath: "", selfOnly: false };
+}
+
+/* ---------------------------------------------------------------------------
+ * CSRF tokens under a schema that stores only their digest
+ *
+ * `osa.sessions.csrf_hash` is `bytea`: SHA-256 of the token and nothing more.
+ * That is the right storage decision — a datastore compromise yields no usable
+ * token — but it removes the assumption the JSON store was built on, that the
+ * raw token can be read back on a later request. `Principal.session.csrfToken`
+ * is passed into client components as a prop by five pages and returned by
+ * `GET /api/auth/session`, so it has to be populated on every request, not just
+ * on the one that minted the session.
+ *
+ * Storing the token in a second cookie, or in the session cookie's value, would
+ * make it recoverable but would also hand it to anything that can read the
+ * cookie jar. Instead the token is DERIVED:
+ *
+ *     csrfToken = HMAC-SHA256(AUTH_SECRET, "csrf:v1:" || rawSessionToken)
+ *
+ * so it is recomputable on any request that presents the cookie, and only by
+ * this server:
+ *
+ *   * The raw session token exists in exactly one place, the HttpOnly cookie.
+ *     The database holds only its SHA-256, so a database compromise still
+ *     yields neither a usable cookie nor a usable CSRF token.
+ *   * HMAC is one-way, so the CSRF token — which is deliberately readable by
+ *     the page's own JavaScript — never leaks the session token back.
+ *   * It is unpredictable without `AUTH_SECRET`, which is what a synchronizer
+ *     token has to be.
+ *
+ * The derivation alone is not trusted. `resolvePrincipal` verifies the derived
+ * token against the stored `csrf_hash` with `csrfMatches` before putting it on
+ * the Principal, so a token minted under a rotated `AUTH_SECRET` fails closed
+ * (the session is rejected and the person signs in again) rather than being
+ * silently accepted against a row it does not match.
+ *
+ * The JSON store keeps its own random per-session token, unchanged. Both
+ * backends therefore hand `assertCsrf` a raw token to compare, which is why
+ * that function keeps its exact signature and stays synchronous.
+ * ------------------------------------------------------------------------- */
+
+const CSRF_DEVELOPMENT_SECRET = "development-auth-secret-replace-me";
+
+function csrfSecret(): string {
+  const secret = process.env.AUTH_SECRET;
+  if (secret && secret.length > 0) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("AUTH_SECRET must be configured before sessions can be issued in production");
+  }
+  return CSRF_DEVELOPMENT_SECRET;
+}
+
+function deriveCsrfToken(sessionToken: string): string {
+  return createHmac("sha256", csrfSecret()).update(`csrf:v1:${sessionToken}`).digest("base64url");
+}
+
+/** Constant-time string comparison; length is not secret, contents are. */
+function tokensMatch(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 export type Principal = {
   session: Session;
   user: PublicUser;
@@ -68,6 +193,8 @@ function cookieValue(request: Request, name: string): string | null {
 export async function login(email: string, password: string, requestId: string, tenantSlug?: string): Promise<{ session: Session; user: PublicUser }> {
   const throttleKey = `${email.trim().toLowerCase()}|${tenantSlug ?? ""}`;
   throttleLogin(throttleKey);
+  const store = await postgres();
+  if (store) return loginWithPostgres(store, email, password, requestId, tenantSlug, throttleKey);
   const database = await readDatabase();
   const matchingTenantId = tenantSlug ? database.tenants.find((tenant) => tenant.slug === tenantSlug.trim().toLowerCase())?.id : undefined;
   const candidates = database.users.filter((candidate) => candidate.email.toLowerCase() === email.trim().toLowerCase() && (!tenantSlug || candidate.tenantId === matchingTenantId));
@@ -133,9 +260,144 @@ export async function login(email: string, password: string, requestId: string, 
   return { session, user: withoutSecrets(user) };
 }
 
+/**
+ * Tenant-first login.
+ *
+ * `findTenantBySlug` is the one query that runs with no tenant context —
+ * `osa.tenants` is the single table `001` leaves outside the RLS array — and
+ * everything after it runs inside that tenant's context. The email lookup never
+ * happens across tenants, which is the RLS escape README-migration.md §5 warns
+ * about, so a slug is genuinely required.
+ *
+ * The login form does not send one and is not this work's file to change, so
+ * the slug is resolved in this order:
+ *
+ *   1. the `tenantSlug` argument (`POST /api/auth/login` already forwards it);
+ *   2. `DEFAULT_TENANT_SLUG`, the deployment's home workspace;
+ *   3. otherwise refuse, with the message the JSON path already uses when an
+ *      address is ambiguous across tenants.
+ *
+ * The JSON store's "emails happen to be unique across tenants, so scan them
+ * all" is NOT reproduced. It only works because the whole table is readable in
+ * one process, and reproducing it here would mean either querying users with no
+ * tenant context or enumerating every tenant and probing each in turn —
+ * the first is the escape, the second turns one login into one query per
+ * tenant on an unauthenticated endpoint. Refusing is the honest answer, and it
+ * is the change README-migration.md §5 asks for.
+ */
+async function loginWithPostgres(
+  store: OsaPersistence,
+  email: string,
+  password: string,
+  requestId: string,
+  tenantSlug: string | undefined,
+  throttleKey: string,
+): Promise<{ session: Session; user: PublicUser }> {
+  // `||`, not `??`: an empty `tenantSlug` in the request body is an absent one,
+  // and must still fall through to the deployment's configured workspace.
+  const slug = (tenantSlug?.trim() || process.env.DEFAULT_TENANT_SLUG?.trim() || "").toLowerCase();
+  if (!slug) {
+    verifyPassword(password, DECOY_PASSWORD_HASH);
+    throw new AuthError(401, "Tenant selection required");
+  }
+
+  const tenant = await store.findTenantBySlug(slug);
+  const user = tenant ? await store.read(preAuthScope(tenant.id), (repo) => repo.findUserByEmail(email)) : null;
+
+  // Timing equalisation, exactly as on the JSON path: an unknown address, an
+  // unknown workspace and a wrong password all cost one scrypt derivation.
+  const passwordMatches = user
+    ? verifyPassword(password, user.passwordHash)
+    : (verifyPassword(password, DECOY_PASSWORD_HASH), false);
+
+  if (!user || !user.active || !passwordMatches) {
+    // Failures are audited even when the account does not exist, provided the
+    // workspace does — an unknown slug has no chain to append to, which is the
+    // same rule the JSON path applies to an unknown `matchingTenantId`.
+    //
+    // `findUserByEmail` filters `AND u.active` in SQL, so a deactivated account
+    // is indistinguishable from an unknown one here and audits as
+    // `unknown_account`. Recovering `account_inactive` needs a repository
+    // method that returns inactive users, which this work does not own.
+    if (tenant) {
+      await store.write(user ? actorScope(user) : preAuthScope(tenant.id), (repo) => repo.appendAudit({
+        actorUserId: user?.id ?? null,
+        action: "auth.login",
+        resourceType: "session",
+        resourceId: null,
+        outcome: "failure",
+        requestId,
+        // No email or password material: the ledger is readable by auditors.
+        metadata: { reason: user ? (user.active ? "invalid_credentials" : "account_inactive") : "unknown_account" },
+      }));
+    }
+    throw new AuthError(401, "Invalid credentials");
+  }
+
+  const issuedAt = new Date();
+  const sessionToken = secureToken();
+  const session: Session = {
+    id: sessionToken,
+    userId: user.id,
+    tenantId: user.tenantId,
+    csrfToken: deriveCsrfToken(sessionToken),
+    createdAt: issuedAt.toISOString(),
+    expiresAt: new Date(issuedAt.getTime() + SESSION_HOURS * 60 * 60 * 1000).toISOString(),
+  };
+
+  // One transaction: the session row and its ledger entry land together or
+  // neither does. `createSession` stores only SHA-256 of each token.
+  //
+  // MAX_SESSIONS_PER_USER is NOT enforced here, and that is a reported gap
+  // rather than an oversight. `OsaRepository` exposes `deleteSession(token)`
+  // and `deleteSessionsForUser(userId)` and nothing between them, and the
+  // stored tokens are digests, so the newest few cannot be identified and kept.
+  // The only reachable behaviour is the all-or-nothing eviction the JSON path's
+  // comment explicitly rejects (signing in on a phone would sign you out of the
+  // tablet). Capping needs one method on `OsaRepository` — for example
+  // `pruneSessions(userId, keepNewest)`, ordering by `created_at` and deleting
+  // the tail — which is a change to a file this work does not own. Expiry needs
+  // nothing: `osa.resolve_session` already refuses rows past `expires_at`.
+  await store.write(actorScope(user), async (repo) => {
+    await repo.createSession({ sessionToken, csrfToken: session.csrfToken, expiresAt: session.expiresAt });
+    await repo.appendAudit({
+      actorUserId: user.id,
+      action: "auth.login",
+      resourceType: "session",
+      resourceId: sessionToken.slice(0, 12),
+      outcome: "success",
+      requestId,
+    });
+  });
+
+  clearThrottle(throttleKey);
+  return { session, user: withoutSecrets(user) };
+}
+
 export async function logout(request: Request, requestId: string): Promise<void> {
   const token = cookieValue(request, SESSION_COOKIE);
   if (!token) return;
+  const store = await postgres();
+  if (store) {
+    // `resolveSession` is the only way back from an opaque cookie to a tenant,
+    // and `deleteSession` needs that tenant context. A session that no longer
+    // resolves — expired, already deleted, never issued — is a no-op with no
+    // ledger entry, which is what the JSON path does for an unknown token.
+    const reference = await store.resolveSession(token);
+    if (!reference) return;
+    await store.write(sessionScope(reference), async (repo) => {
+      await repo.deleteSession(token);
+      await repo.appendAudit({
+        actorUserId: reference.userId,
+        action: "auth.logout",
+        resourceType: "session",
+        resourceId: token.slice(0, 12),
+        outcome: "success",
+        requestId,
+      });
+    });
+    return;
+  }
   const database = await readDatabase();
   const session = database.sessions.find((candidate) => candidate.id === token);
   await mutateDatabase((state) => { state.sessions = state.sessions.filter((candidate) => candidate.id !== token); });
@@ -144,12 +406,59 @@ export async function logout(request: Request, requestId: string): Promise<void>
 
 export async function resolvePrincipal(token: string | null): Promise<Principal> {
   if (!token) throw new AuthError(401, "Authentication required");
+  const store = await postgres();
+  if (store) return resolvePrincipalWithPostgres(store, token);
   const database = await readDatabase();
   const session = database.sessions.find((candidate) => candidate.id === token);
   if (!session || new Date(session.expiresAt).getTime() <= Date.now()) throw new AuthError(401, "Session expired");
   const user = database.users.find((candidate) => candidate.id === session.userId && candidate.tenantId === session.tenantId && candidate.active);
   if (!user) throw new AuthError(401, "Account is unavailable");
   return { session, user: withoutSecrets(user), tenantId: session.tenantId, roles: user.roles, delegatedOrgPaths: user.delegatedOrgPaths };
+}
+
+/**
+ * Session resolution is the one operation that cannot be tenant-scoped first:
+ * the cookie carries an opaque token and nothing else. `resolveSession` goes
+ * through `osa.resolve_session`, the STABLE `SECURITY DEFINER` function owned
+ * by the NOLOGIN `ik_osa_session_resolver` role — the only sanctioned RLS
+ * escape in the system, and one that returns four columns of one row keyed by a
+ * digest. Everything after this line runs inside the tenant context it yields.
+ */
+async function resolvePrincipalWithPostgres(store: OsaPersistence, token: string): Promise<Principal> {
+  const reference = await store.resolveSession(token);
+  // The function already filters `revoked_at IS NULL AND expires_at > now()`,
+  // so an expired session is indistinguishable from an absent one, as here.
+  if (!reference) throw new AuthError(401, "Session expired");
+
+  // Re-derive the CSRF token from the cookie and prove it against the digest
+  // the row actually holds. A session issued under a rotated AUTH_SECRET fails
+  // here rather than being carried forward with a token that would never match.
+  const csrfToken = deriveCsrfToken(token);
+  if (!csrfMatches(csrfToken, reference.csrfHash)) throw new AuthError(401, "Session expired");
+
+  const record = await store.read(sessionScope(reference), (repo) => repo.loadPrincipal(reference.userId));
+  if (!record) throw new AuthError(401, "Account is unavailable");
+
+  const session: Session = {
+    id: token,
+    userId: reference.userId,
+    tenantId: reference.tenantId,
+    csrfToken,
+    // `osa.resolve_session` returns four columns and `created_at` is not one of
+    // them. Every session this module issues expires exactly SESSION_HOURS
+    // after it was created, so the origin is recoverable from the expiry
+    // without widening the one RLS escape in the system to carry a field
+    // nothing reads.
+    createdAt: new Date(Date.parse(reference.expiresAt) - SESSION_HOURS * 60 * 60 * 1000).toISOString(),
+    expiresAt: reference.expiresAt,
+  };
+  return {
+    session,
+    user: withoutSecrets(record.user),
+    tenantId: reference.tenantId,
+    roles: record.roles,
+    delegatedOrgPaths: record.delegatedOrgPaths,
+  };
 }
 
 export async function principalFromRequest(request: Request): Promise<Principal> {
@@ -166,8 +475,16 @@ export async function principalFromCookies(): Promise<Principal> {
   return resolvePrincipal(store.get(SESSION_COOKIE)?.value ?? null);
 }
 
+/**
+ * Both backends put a raw token on the Principal — random on the JSON path,
+ * derived and already verified against `csrf_hash` on the PostgreSQL one — so
+ * this stays a synchronous comparison with no datastore round trip. The
+ * comparison is constant-time; the previous `!==` leaked the length of the
+ * matching prefix to anyone able to time the endpoint.
+ */
 export function assertCsrf(request: Request, principal: Principal): void {
-  if (request.headers.get("x-csrf-token") !== principal.session.csrfToken) throw new AuthError(403, "Invalid CSRF token");
+  const presented = request.headers.get("x-csrf-token");
+  if (!presented || !tokensMatch(presented, principal.session.csrfToken)) throw new AuthError(403, "Invalid CSRF token");
 }
 
 export function serializeSessionCookie(session: Session): string {
@@ -223,6 +540,20 @@ export function authorize(principal: Principal, action: Action, resource?: { ten
   }
 }
 
+/**
+ * JSON-path only, and currently called by nothing in `src/`.
+ *
+ * A bare user id carries no tenant, and every PostgreSQL read needs a tenant
+ * context before it touches `osa.users`, so this cannot be answered against the
+ * database as written — `loadPrincipal` takes a scope for exactly that reason.
+ * It refuses rather than quietly reading the JSON store while PostgreSQL is the
+ * system of record: silently answering from the wrong datastore is the failure
+ * the seam exists to prevent. Callers that appear later should resolve the user
+ * through the principal they already hold.
+ */
 export async function currentUserById(userId: string): Promise<User | undefined> {
+  if (process.env.DATABASE_URL) {
+    throw new Error("currentUserById cannot be resolved without a tenant context; load the user through the request's principal.");
+  }
   return (await readDatabase()).users.find((user) => user.id === userId);
 }

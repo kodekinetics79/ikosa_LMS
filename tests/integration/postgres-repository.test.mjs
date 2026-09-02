@@ -90,6 +90,23 @@ async function probe() {
       await pool.end();
       return { skip: `migration 002 has not been applied at ${redact(adminUrl)}` };
     }
+    /*
+     * Refuse to run against a database holding real data.
+     *
+     * This suite writes fixture tenants ("RLS probe alpha/beta") and audit
+     * events. `osa.audit_events` is append-only by trigger, so once those rows
+     * land they CANNOT be removed without disabling the immutability guarantee
+     * the ledger exists to provide. Pointing DATABASE_URL at a live database
+     * therefore permanently pollutes it. Ask first; skip loudly otherwise.
+     */
+    const { rows: occupancy } = await pool.query(
+      `SELECT count(*)::int AS real_tenants FROM osa.tenants WHERE slug NOT LIKE 'rls-%'`);
+    if (occupancy[0].real_tenants > 0 && process.env.IK_PG_ALLOW_SHARED_DB !== 'true') {
+      await pool.end();
+      return {
+        skip: `${redact(adminUrl)} holds ${occupancy[0].real_tenants} non-fixture tenant(s); this suite writes rows that the append-only ledger makes permanent. Point DATABASE_URL at a throwaway database, or set IK_PG_ALLOW_SHARED_DB=true to accept that.`,
+      };
+    }
     return { pg, pool, adminIsSuperuser: rows[0].admin_is_superuser === true, skip: false };
   } catch (error) {
     await pool.end().catch(() => {});
