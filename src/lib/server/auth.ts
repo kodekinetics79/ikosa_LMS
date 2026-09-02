@@ -17,30 +17,78 @@ const MAX_SESSIONS_PER_USER = 5;
 /**
  * Per-process login throttle.
  *
- * Honest limitation: this is in-memory, so it protects a single instance only -
- * the same constraint the JSON datastore already imposes. It must move to a
- * shared store alongside the PostgreSQL migration. It is here because the
- * alternative today is no brute-force resistance whatsoever.
+ * It counts FAILURES, and it counts them after the credential has been checked.
+ * The previous version counted every ATTEMPT before checking anything and threw
+ * once the counter passed the limit, so ten wrong guesses locked the account for
+ * fifteen minutes — and the owner's correct password was refused along with the
+ * attacker's wrong ones. `clearThrottle` only ran after a successful login,
+ * which that throw had made unreachable, so nothing but the window expiring
+ * could release it. Anyone who knew an address could deny its owner service,
+ * which is a worse outcome than the online guessing it was meant to slow.
+ *
+ * The rule now is: a correct credential always authenticates. Guessing is
+ * slowed instead of stopped, with a bounded, escalating delay on the failure
+ * response once the limit is passed; the delay costs an attacker a serial round
+ * trip per guess and costs a legitimate user nothing, because a legitimate user
+ * is not on the failure path. A success clears the counter outright.
+ *
+ * The key is the address alone. Including the tenant slug, as the previous
+ * version did, let an attacker reset their own counter by varying a field they
+ * control — and now that the counter is the only brake left, that bypass is no
+ * longer affordable.
+ *
+ * Honest limitation, unchanged: this is in-memory, so it protects a single
+ * instance only - the same constraint the JSON datastore already imposes. It
+ * must move to a shared store alongside the PostgreSQL migration; see
+ * README-migration.md §5 and ADR-002.
  */
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_BACKOFF_BASE_MS = 200;
+const LOGIN_BACKOFF_MAX_MS = 2_000;
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
-function throttleLogin(key: string): void {
+function throttleKeyFor(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/** Records one failed sign-in and returns the failures on record in this window. */
+function recordFailedLogin(key: string): number {
   const now = Date.now();
   const entry = loginAttempts.get(key);
   if (!entry || entry.resetAt <= now) {
     loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
-    return;
+    return 1;
   }
   entry.count += 1;
-  if (entry.count > LOGIN_MAX_ATTEMPTS) {
-    throw new AuthError(401, "Too many sign-in attempts. Try again later.");
-  }
+  return entry.count;
 }
 
 function clearThrottle(key: string): void {
   loginAttempts.delete(key);
+}
+
+/** Doubles per failure past the limit and then stops; never unbounded. */
+function backoffFor(failures: number): number {
+  if (failures <= LOGIN_MAX_ATTEMPTS) return 0;
+  const steps = Math.min(failures - LOGIN_MAX_ATTEMPTS - 1, 10);
+  return Math.min(LOGIN_BACKOFF_BASE_MS * 2 ** steps, LOGIN_BACKOFF_MAX_MS);
+}
+
+/**
+ * The single exit for a rejected credential, shared by both datastores.
+ *
+ * Called only once the password has actually been evaluated and the failure
+ * audited, so the counter measures failures rather than traffic. The message
+ * changes past the limit — the caller has already failed either way, so this
+ * discloses nothing about the account and tells an operator reading the ledger
+ * that the brake engaged.
+ */
+async function refuseLogin(key: string): Promise<never> {
+  const delay = backoffFor(recordFailedLogin(key));
+  if (delay === 0) throw new AuthError(401, "Invalid credentials");
+  await new Promise((resolve) => setTimeout(resolve, delay));
+  throw new AuthError(401, "Too many sign-in attempts. Try again later.");
 }
 
 /** Same scrypt cost as a real credential, so a failed lookup is indistinguishable. */
@@ -191,8 +239,9 @@ function cookieValue(request: Request, name: string): string | null {
 }
 
 export async function login(email: string, password: string, requestId: string, tenantSlug?: string): Promise<{ session: Session; user: PublicUser }> {
-  const throttleKey = `${email.trim().toLowerCase()}|${tenantSlug ?? ""}`;
-  throttleLogin(throttleKey);
+  // No pre-check: the credential is evaluated first, and only a FAILURE reaches
+  // the throttle. See the note on `refuseLogin`.
+  const throttleKey = throttleKeyFor(email);
   const store = await postgres();
   if (store) return loginWithPostgres(store, email, password, requestId, tenantSlug, throttleKey);
   const database = await readDatabase();
@@ -227,7 +276,7 @@ export async function login(email: string, password: string, requestId: string, 
         metadata: { reason: user ? (user.active ? "invalid_credentials" : "account_inactive") : "unknown_account" },
       });
     }
-    throw new AuthError(401, "Invalid credentials");
+    return refuseLogin(throttleKey);
   }
 
   const session: Session = {
@@ -331,7 +380,7 @@ async function loginWithPostgres(
         metadata: { reason: user ? (user.active ? "invalid_credentials" : "account_inactive") : "unknown_account" },
       }));
     }
-    throw new AuthError(401, "Invalid credentials");
+    return refuseLogin(throttleKey);
   }
 
   const issuedAt = new Date();

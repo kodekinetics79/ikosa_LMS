@@ -23,10 +23,17 @@ export async function register(): Promise<void> {
     failures.push("DATABASE_URL is not set; PostgreSQL is the system of record in production.");
   } else {
     try {
+      // Imports the factory directly rather than going through
+      // lib/server/persistence, which carries `server-only`. That guard keeps
+      // the pool out of any client bundle, but instrumentation does not run in
+      // a Server Component context, so importing it here throws
+      // "This module cannot be imported from a Client Component module" and
+      // takes down every dynamic route with an opaque 500.
+      const { createPostgresPersistence } = await import("./lib/server/db/postgres");
       // Also asserts the connected role satisfies ADR-001: not a superuser, no
       // BYPASSRLS, owns no table in the schema.
-      const { requirePersistence } = await import("./lib/server/persistence");
-      await requirePersistence();
+      const gateway = await createPostgresPersistence();
+      if (!gateway) failures.push("DATABASE_URL is set but no PostgreSQL connection could be created.");
     } catch (error) {
       failures.push(`PostgreSQL is unusable: ${error instanceof Error ? error.message : String(error)}`);
     }
