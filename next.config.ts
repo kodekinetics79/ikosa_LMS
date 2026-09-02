@@ -47,7 +47,10 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // "standalone" is for the Dockerfile in this repo. Vercel builds its own
+  // output and reports `No Output Directory named "public"` when it sees a
+  // standalone build, so leave the default in place there.
+  output: process.env.VERCEL ? undefined : "standalone",
   allowedDevOrigins: ["127.0.0.1", "localhost"],
   poweredByHeader: false,
   reactStrictMode: true,
