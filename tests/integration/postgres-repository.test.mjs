@@ -276,9 +276,21 @@ async function provisionProbeRole(client) {
   await client.query(`
     DO $$ BEGIN
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN
-        EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        -- Managed platforms (Neon, RDS) run migrations as a non-superuser, and
+        -- only a superuser may touch the SUPERUSER attribute at all - even to
+        -- clear it. Roles there are NOSUPERUSER by default, so state the
+        -- attribute only when we are actually able to.
+        IF (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+          EXECUTE format('ALTER ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        ELSE
+          EXECUTE format('ALTER ROLE %I LOGIN NOBYPASSRLS PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        END IF;
       ELSE
-        EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        IF (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+          EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        ELSE
+          EXECUTE format('CREATE ROLE %I LOGIN NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT PASSWORD %L', '${PROBE_ROLE}', '${PROBE_PASSWORD}');
+        END IF;
       END IF;
     END $$;`);
   await client.query(`GRANT USAGE ON SCHEMA osa TO ${PROBE_ROLE}`);

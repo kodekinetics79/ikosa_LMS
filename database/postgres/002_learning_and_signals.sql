@@ -404,7 +404,25 @@ AS $$
     AND s.expires_at > now()
 $$;
 
+-- PostgreSQL 16 split role membership from the right to SET ROLE, so a
+-- CREATEROLE migration user that just created this role still cannot assume it,
+-- and the OWNER TO below fails with "must be able to SET ROLE". Granting
+-- membership WITH SET makes the ownership transfer possible on PG16+ and on
+-- managed platforms (Neon, RDS) where the migration user is not a superuser.
+DO $$
+BEGIN
+  IF NOT pg_has_role(current_user, 'ik_osa_session_resolver', 'SET') THEN
+    EXECUTE format('GRANT ik_osa_session_resolver TO %I WITH SET TRUE', current_user);
+  END IF;
+END
+$$;
+
+-- PostgreSQL requires a new owner to hold CREATE on the object's schema, so the
+-- transfer needs it momentarily. It is revoked immediately afterwards: this role
+-- must own exactly one function and be able to create nothing.
+GRANT CREATE ON SCHEMA osa TO ik_osa_session_resolver;
 ALTER FUNCTION osa.resolve_session(bytea) OWNER TO ik_osa_session_resolver;
+REVOKE CREATE ON SCHEMA osa FROM ik_osa_session_resolver;
 -- SECURITY DEFINER functions are EXECUTE-to-PUBLIC by default. Revoke first,
 -- then grant deliberately.
 REVOKE ALL ON FUNCTION osa.resolve_session(bytea) FROM PUBLIC;

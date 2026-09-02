@@ -12,3 +12,6 @@ test-results/
 data/runtime/
 *.log
 .DS_Store
+.vercel
+.env*
+tsconfig.tsbuildinfo
