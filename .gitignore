@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.local
+# Local development datastore: contains password hashes and live session
+# tokens for the seeded identities. Never commit it.
+.data/
+data/runtime/
+*.log
+.DS_Store

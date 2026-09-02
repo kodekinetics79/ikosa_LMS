@@ -1,0 +1,53 @@
+name: ik-osa
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ik_osa}
+      POSTGRES_USER: ${POSTGRES_USER:-ik_osa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      APP_ENV: production
+      IK_DATA_DIR: /app-data
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ik_osa}:${POSTGRES_PASSWORD:-local-only-change-me}@postgres:5432/${POSTGRES_DB:-ik_osa}
+      AUTH_SECRET: ${AUTH_SECRET:-development-secret-replace-with-32-random-bytes}
+      AUDIT_HASH_SECRET: ${AUDIT_HASH_SECRET:-development-audit-secret-replace-me}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+    ports: ["3000:3000"]
+    volumes: ["app-data:/app-data"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp", "/app/.next/cache"]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  postgres-data:
+  app-data:
+
