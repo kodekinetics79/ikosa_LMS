@@ -63,8 +63,33 @@ function candidateSpecifiers(): string[] {
 
 let cached: PgModule | null | undefined;
 
+function asPgModule(loaded: unknown): PgModule | null {
+  const candidate = loaded as { Pool?: unknown; default?: { Pool?: unknown } };
+  if (typeof candidate.Pool === "function") return candidate as PgModule;
+  if (typeof candidate.default?.Pool === "function") return candidate.default as PgModule;
+  return null;
+}
+
 export async function loadPgModule(): Promise<PgModule | null> {
   if (cached !== undefined) return cached;
+
+  // A LITERAL specifier first. `pg` is a real dependency of this package now,
+  // and a bundler can only trace a literal - Turbopack cannot resolve the
+  // computed specifiers below, so inside the Next.js server bundle every
+  // candidate failed and this returned null. That made `requirePersistence()`
+  // report "DATABASE_URL is not configured" on a deployment where it plainly
+  // was, and blocked the whole PostgreSQL cutover.
+  try {
+    const resolved = asPgModule(await import("pg"));
+    if (resolved) {
+      cached = resolved;
+      return cached;
+    }
+  } catch {
+    // Fall through: the driver may still be reachable at one of the paths below
+    // (a scratch install, or IK_PG_MODULE pointing somewhere explicit).
+  }
+
   for (const specifier of candidateSpecifiers()) {
     try {
       // A non-literal specifier, so the bundler does not try to resolve a

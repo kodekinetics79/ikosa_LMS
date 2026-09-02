@@ -23,17 +23,22 @@
  *
  * `createPostgresPersistence` refuses, fatally, to run as a role with BYPASSRLS
  * or table ownership (ADR-001), and the provisioned Neon connection string is
- * the database owner. So `DATABASE_URL` is used as the ADMIN connection —
- * to provision fixtures — and the application under test is pointed at a
- * throwaway, non-owning, NOBYPASSRLS role carrying exactly the grant matrix of
- * migration 002 §7. That is the same device `postgres-repository.test.mjs`
- * uses, and it is what makes this a test of the real RLS-constrained path
- * rather than of a privileged shortcut.
+ * the database owner. So `DATABASE_URL` is the ADMIN connection, used only to
+ * manage fixtures, and the application under test is pointed at the runtime
+ * role — resolved the way `scripts/provision-postgres.mjs` resolves it:
+ *
+ *   1. `IK_RUNTIME_DATABASE_URL`
+ *   2. the file named by `IK_RUNTIME_URL_FILE` (default `/tmp/ik-runtime-url`)
+ *   3. failing both, a throwaway role provisioned here with migration 002 §7's
+ *      grant matrix, the same device `postgres-repository.test.mjs` uses.
+ *
+ * Either way the application runs RLS-constrained, as a deployment does, rather
+ * than through a privileged shortcut.
  */
 
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { createRequire, registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -62,6 +67,7 @@ process.env.IK_DATA_DIR = mkdtempSync(path.join(tmpdir(), "ik-osa-auth-pg-"));
 process.env.AUTH_SECRET = "auth-postgres-test-secret-not-the-published-default";
 
 const ADMIN_URL = process.env.DATABASE_URL ?? "";
+const RUNTIME_URL_FILE = process.env.IK_RUNTIME_URL_FILE ?? "/tmp/ik-runtime-url";
 const PROBE_ROLE = "ik_osa_auth_probe";
 const PROBE_PASSWORD = `probe_${randomUUID().replace(/-/g, "")}`;
 const PASSWORD = "Probe!2026-correct-horse";
@@ -90,6 +96,9 @@ let fixture: Fixture | undefined;
 let auth: Auth | undefined;
 /** The session minted by the first test and reused by the ones that follow it. */
 let issued: { token: string; csrfToken: string } | undefined;
+/** The ledger is append-only and the fixture is reused, so every audit assertion is relative to this. */
+let baselineSequence = "0";
+let runtimeRole = "";
 
 function cookieRequest(token: string, url = "http://localhost/api/auth/session"): Request {
   return new Request(url, { headers: { cookie: `${auth!.SESSION_COOKIE}=${encodeURIComponent(token)}` } });
@@ -136,37 +145,74 @@ function probeConnectionString(): string {
 }
 
 /**
- * One tenant, one org unit, one user with a real scrypt credential.
- *
- * Deliberately minimal and clearly labelled: this is a test fixture, not seed
- * data, and it is not the provisioning script's job being done here.
+ * The runtime role the application will actually connect as. Prefers the one the
+ * operator provisioned — testing the real role beats testing a lookalike — and
+ * falls back to minting a throwaway so a developer with only an admin URL can
+ * still run this file.
  */
+async function runtimeConnectionString(pool: Pool): Promise<{ url: string; role: string }> {
+  const configured = process.env.IK_RUNTIME_DATABASE_URL?.trim() || readRuntimeUrlFile();
+  if (configured) return { url: configured, role: new URL(configured).username };
+  await provisionProbeRole(pool);
+  return { url: probeConnectionString(), role: PROBE_ROLE };
+}
+
+function readRuntimeUrlFile(): string {
+  try {
+    return readFileSync(RUNTIME_URL_FILE, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * One tenant, one org unit, one user with a real scrypt credential — the SAME
+ * one on every run.
+ *
+ * The identifiers are derived with the repository's own `uuidV5`, so the fixture
+ * is created once and adopted thereafter. That matters: `osa.audit_events` is
+ * append-only and `osa.tenants` is referenced by it, so a tenant this file
+ * created can never be deleted again. A per-run fixture would therefore leave a
+ * permanent tenant behind on every single run of the suite; this leaves exactly
+ * one, ever. It is a test fixture, not seed data, and it is deliberately not the
+ * provisioning script's job being done here.
+ */
+const FIXTURE_SLUG = "auth-probe-fixture";
+
 async function seedFixture(pool: Pool): Promise<Fixture> {
   const { hashPassword } = await import("../../src/lib/server/security");
+  const { uuidV5 } = await import("../../src/lib/server/db/ids");
   const created: Fixture = {
-    tenant: randomUUID(),
-    slug: `auth-probe-${randomUUID().slice(0, 8)}`,
-    orgUnit: randomUUID(),
-    user: randomUUID(),
-    email: `analyst@auth-probe-${randomUUID().slice(0, 8)}.example`,
+    tenant: uuidV5("auth-postgres-test:tenant"),
+    slug: FIXTURE_SLUG,
+    orgUnit: uuidV5("auth-postgres-test:org-unit"),
+    user: uuidV5("auth-postgres-test:user"),
+    email: `analyst@${FIXTURE_SLUG}.example`,
   };
 
   await pool.query(
-    "INSERT INTO osa.tenants (id, slug, name, home_region, locale) VALUES ($1,$2,$3,'us-east','en-US')",
+    `INSERT INTO osa.tenants (id, slug, name, home_region, locale) VALUES ($1,$2,$3,'us-east','en-US')
+     ON CONFLICT (id) DO NOTHING`,
     [created.tenant, created.slug, "Auth probe workspace"]);
   // Forced RLS applies to any non-superuser, so the seeding connection needs a
   // tenant context of its own for the WITH CHECK clauses to pass.
   await pool.query("SELECT set_config('app.tenant_id', $1, false), set_config('app.user_id', $2, false)",
     [created.tenant, created.user]);
   await pool.query(
-    "INSERT INTO osa.org_units (id, tenant_id, parent_id, code, name, path) VALUES ($1,$2,NULL,'ROOT','Probe root',$3::ltree)",
+    `INSERT INTO osa.org_units (id, tenant_id, parent_id, code, name, path) VALUES ($1,$2,NULL,'ROOT','Probe root',$3::ltree)
+     ON CONFLICT (id) DO NOTHING`,
     [created.orgUnit, created.tenant, created.orgUnit]);
   await pool.query(
     `INSERT INTO osa.users (id, tenant_id, org_unit_id, email, display_name, password_hash, delegated_org_paths)
-     VALUES ($1,$2,$3,$4,'Probe Analyst',$5,ARRAY[$6::ltree])`,
+     VALUES ($1,$2,$3,$4,'Probe Analyst',$5,ARRAY[$6::ltree])
+     ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, active = true`,
     [created.user, created.tenant, created.orgUnit, created.email, hashPassword(PASSWORD), created.orgUnit]);
-  await pool.query("INSERT INTO osa.user_roles (tenant_id, user_id, role_code) VALUES ($1,$2,'tna_analyst')",
+  await pool.query(
+    `INSERT INTO osa.user_roles (tenant_id, user_id, role_code) VALUES ($1,$2,'tna_analyst')
+     ON CONFLICT DO NOTHING`,
     [created.tenant, created.user]);
+  // Any session left by an interrupted earlier run.
+  await pool.query("DELETE FROM osa.sessions WHERE tenant_id = $1", [created.tenant]);
   await pool.query("SELECT set_config('app.tenant_id', '', false), set_config('app.user_id', '', false)");
   return created;
 }
@@ -188,11 +234,14 @@ before(async () => {
       skipReason = `the osa schema is incomplete at ${redact(ADMIN_URL)}; apply database/postgres/001 and 002`;
       return;
     }
-    await provisionProbeRole(admin);
+    const runtime = await runtimeConnectionString(admin);
+    runtimeRole = runtime.role;
     fixture = await seedFixture(admin);
+    const head = await admin.query("SELECT coalesce(max(sequence), 0)::text AS head FROM osa.audit_events WHERE tenant_id = $1", [fixture.tenant]);
+    baselineSequence = String(head.rows[0].head);
     // From here the application under test talks to the database as the
     // non-owning runtime role, exactly as a deployment would.
-    process.env.DATABASE_URL = probeConnectionString();
+    process.env.DATABASE_URL = runtime.url;
     auth = await import("../../src/lib/server/auth");
   } catch (error) {
     skipReason = `no usable PostgreSQL at ${redact(ADMIN_URL)} (${(error as NodeJS.ErrnoException).code ?? (error as Error).message})`;
@@ -206,16 +255,14 @@ after(async () => {
   await (await seam?.persistence().catch(() => null))?.close().catch(() => {});
 
   if (admin && fixture) {
+    // Sessions are the only rows this file is entitled to remove, and the only
+    // ones it needs to: the tenant, org unit and user are the reusable fixture,
+    // and `osa.audit_events` is append-only by design, which is exactly why the
+    // fixture is stable rather than minted per run.
     await admin.query("SELECT set_config('app.tenant_id', $1, false), set_config('app.user_id', $2, false)",
       [fixture.tenant, fixture.user]).catch(() => {});
-    for (const table of ["sessions", "user_roles", "users", "org_units"]) {
-      await admin.query(`DELETE FROM osa.${table} WHERE tenant_id = $1`, [fixture.tenant]).catch(() => {});
-    }
+    await admin.query("DELETE FROM osa.sessions WHERE tenant_id = $1", [fixture.tenant]).catch(() => {});
     await admin.query("SELECT set_config('app.tenant_id', '', false), set_config('app.user_id', '', false)").catch(() => {});
-    // osa.audit_events is append-only by design — the trigger that refuses a
-    // DELETE is the property under test elsewhere — and osa.tenants is
-    // referenced by those rows, so both survive this run on purpose.
-    await admin.query("DELETE FROM osa.tenants WHERE id = $1", [fixture.tenant]).catch(() => {});
   }
   await admin?.end().catch(() => {});
 });
@@ -245,9 +292,10 @@ test("login succeeds against PostgreSQL and writes one hashed session row", asyn
   assert.deepEqual(Buffer.from(rows[0].csrf_hash as Uint8Array), sha256(result.session.csrfToken));
 
   const audit = await admin!.query(
-    "SELECT outcome, actor_user_id FROM osa.audit_events WHERE tenant_id = $1 AND action = 'auth.login' AND outcome = 'success'",
-    [fixture!.tenant]);
-  assert.equal(audit.rows.length, 1);
+    `SELECT actor_user_id FROM osa.audit_events
+      WHERE tenant_id = $1 AND sequence > $2::bigint AND action = 'auth.login' AND outcome = 'success'`,
+    [fixture!.tenant, baselineSequence]);
+  assert.equal(audit.rows.length, 1, "one successful sign-in, one ledger entry");
   assert.equal(String(audit.rows[0].actor_user_id), fixture!.user);
 
   issued = { token: result.session.id, csrfToken: result.session.csrfToken };
@@ -347,8 +395,9 @@ test("logout deletes the row and the cookie stops resolving", async (t) => {
     (error: unknown) => error instanceof auth!.AuthError && error.status === 401 && error.message === "Session expired");
 
   const audit = await admin!.query(
-    "SELECT actor_user_id FROM osa.audit_events WHERE tenant_id = $1 AND action = 'auth.logout' AND outcome = 'success'",
-    [fixture!.tenant]);
+    `SELECT actor_user_id FROM osa.audit_events
+      WHERE tenant_id = $1 AND sequence > $2::bigint AND action = 'auth.logout' AND outcome = 'success'`,
+    [fixture!.tenant, baselineSequence]);
   assert.ok(audit.rows.length >= 1);
   assert.equal(String(audit.rows[0].actor_user_id), fixture!.user);
 });
@@ -388,7 +437,7 @@ test("the application connects as a role that cannot bypass row-level security",
   if (skipReason) return t.skip(skipReason);
   const seam = await import("../../src/lib/server/persistence");
   const report = await (await seam.requirePersistence()).assertRuntimeRoleIsSafe();
-  assert.equal(report.role, PROBE_ROLE);
+  assert.equal(report.role, runtimeRole);
   assert.equal(report.bypassRls, false);
   assert.equal(report.superuser, false);
   assert.equal(report.ownedTables, 0);
