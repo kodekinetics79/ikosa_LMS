@@ -39,6 +39,20 @@ export async function register(): Promise<void> {
     }
   }
 
+  const controlPlaneUrl = process.env.CONTROL_PLANE_DATABASE_URL?.trim();
+  if (controlPlaneUrl) {
+    try {
+      // The SaaS control plane crosses tenant boundaries only to provision the
+      // minimum customer identity records. It must therefore use its own
+      // deliberately restricted login and never a migration owner, Neon
+      // `neon_superuser` member, or any BYPASSRLS connection.
+      const { assertControlPlaneConnectionSafe } = await import("./lib/server/control-plane-readiness");
+      await assertControlPlaneConnectionSafe(controlPlaneUrl);
+    } catch (error) {
+      failures.push(`Control-plane database role is unusable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   if (failures.length > 0) {
     throw new Error(`Refusing to start:\n  - ${failures.join("\n  - ")}`);
   }
