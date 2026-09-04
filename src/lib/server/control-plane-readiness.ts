@@ -69,10 +69,17 @@ async function assertPrivileges(pool: Pool): Promise<void> {
     if (rows[0]?.allowed) throw new Error(`Control-plane role must not have ${forbidden} on osa.platform_audit_events`);
   }
 
-  const { rows } = await pool.query<{ allowed: boolean }>(
-    "SELECT has_function_privilege(current_user, 'osa.current_tenant_id()', 'EXECUTE') AS allowed",
-  );
-  if (!rows[0]?.allowed) throw new Error("Control-plane role cannot execute osa.current_tenant_id()");
+  const requiredFunctions = [
+    "osa.current_tenant_id()",
+    "osa.revoke_tenant_sessions(uuid)",
+  ];
+  for (const signature of requiredFunctions) {
+    const { rows } = await pool.query<{ allowed: boolean }>(
+      "SELECT has_function_privilege(current_user, $1, 'EXECUTE') AS allowed",
+      [signature],
+    );
+    if (!rows[0]?.allowed) throw new Error(`Control-plane role cannot execute ${signature}`);
+  }
 }
 
 /**
