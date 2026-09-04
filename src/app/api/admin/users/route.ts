@@ -1,8 +1,6 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import type { PlatformRole } from "@/lib/server/domain";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
-import { requirePersistence } from "@/lib/server/persistence";
-import { scopeForPrincipal } from "@/lib/server/tenant-runtime";
 import { createTenantUser, listTenantUsers, setTenantUserActive } from "@/lib/server/tenant-admin-store";
 
 export const runtime = "nodejs";
@@ -16,24 +14,12 @@ function requireTenantAdmin(roles: PlatformRole[]): void {
 
 function parseRoles(value: unknown): PlatformRole[] {
   if (!Array.isArray(value)) throw new ValidationError("Validation failed", { roles: "Select at least one role" });
-  const roles = [...new Set(value.map(String))].filter((role): role is PlatformRole => ROLES.includes(role as PlatformRole));
-  if (roles.length === 0 || roles.length !== new Set(value.map(String)).size) {
+  const requested = [...new Set(value.map(String))];
+  const roles = requested.filter((role): role is PlatformRole => ROLES.includes(role as PlatformRole));
+  if (roles.length === 0 || roles.length !== requested.length) {
     throw new ValidationError("Validation failed", { roles: "One or more roles are invalid" });
   }
   return roles;
-}
-
-async function audit(principal: Awaited<ReturnType<typeof principalFromRequest>>, rid: string, action: string, userId: string, metadata: Record<string, string | number | boolean | null>) {
-  const persistence = await requirePersistence();
-  await persistence.write(scopeForPrincipal(principal), (repo) => repo.appendAudit({
-    actorUserId: principal.user.id,
-    action,
-    resourceType: "user",
-    resourceId: userId,
-    outcome: "success",
-    requestId: rid,
-    metadata,
-  }));
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -64,8 +50,8 @@ export async function POST(request: Request): Promise<Response> {
         orgUnitId: requiredString(body, "orgUnitId", 100),
         password,
         roles,
+        requestId: rid,
       });
-      await audit(principal, rid, "tenant.user.create", created.id, { email: created.email, orgUnitId: created.orgUnitId, roles: created.roles.join(",") });
       return json(created, { status: 201 });
     } catch (error) {
       if ((error as { code?: string }).code === "23505") throw new ValidationError("Validation failed", { email: "A user with this email already exists in the tenant" });
@@ -83,8 +69,7 @@ export async function PATCH(request: Request): Promise<Response> {
     const body = await objectBody(request);
     const userId = requiredString(body, "userId", 100);
     if (typeof body.active !== "boolean") throw new ValidationError("Validation failed", { active: "Active state must be true or false" });
-    await setTenantUserActive(principal, userId, body.active);
-    await audit(principal, rid, body.active ? "tenant.user.activate" : "tenant.user.deactivate", userId, { active: body.active });
+    await setTenantUserActive(principal, userId, body.active, rid);
     return json({ ok: true, userId, active: body.active });
   } catch (error) { return problem(error, rid); }
 }
