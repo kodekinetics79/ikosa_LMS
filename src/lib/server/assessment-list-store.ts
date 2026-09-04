@@ -1,11 +1,46 @@
 import "server-only";
 
 import type { Principal } from "./auth";
-import type { Assessment } from "./domain";
+import type { Assessment, BloomLevel, QuestionType } from "./domain";
 import type { AssessmentSummary } from "./assessment-store";
 import { scopeForPrincipal } from "./tenant-runtime";
 import { assertRuntimeRoleIsSafe, inspectRuntimeRole, loadPgModule, withTenantTransaction, type Pool } from "./db/driver";
 import { pathToLtree, pathsToLtree } from "./db/ids";
+
+export type AuthorQuestionSummary = {
+  id: string;
+  bankId: string;
+  bankName: string;
+  questionType: QuestionType;
+  prompt: string;
+  options: unknown;
+  answerKey: unknown;
+  rationale: string;
+  points: number;
+  difficulty: number;
+  bloomLevel: BloomLevel;
+  origin: "manual" | "ai" | "import";
+  reviewStatus: "draft" | "approved" | "rejected";
+};
+
+export type MarkingQueueItem = {
+  responseId: string;
+  attemptId: string;
+  assessmentId: string;
+  assessmentCode: string;
+  assessmentTitle: string;
+  learnerId: string;
+  learnerName: string;
+  learnerEmail: string;
+  questionId: string;
+  questionType: QuestionType;
+  prompt: string;
+  response: unknown;
+  answerKey: unknown;
+  rationale: string;
+  maxPoints: number;
+  submittedAt: string;
+};
 
 let poolPromise: Promise<Pool> | null = null;
 
@@ -41,9 +76,13 @@ function toAssessment(row: Record<string, unknown>): Assessment {
   };
 }
 
+function authorLike(principal: Principal): boolean {
+  return principal.roles.some((role) => role === "tenant_admin" || role === "tna_analyst" || role === "assessor");
+}
+
 export async function listAssessmentWorkspace(principal: Principal): Promise<AssessmentSummary[]> {
   const scope = scopeForPrincipal(principal);
-  const authorView = principal.roles.some((role) => role === "tenant_admin" || role === "tna_analyst" || role === "assessor");
+  const authorView = authorLike(principal);
   const db = await pool();
 
   return withTenantTransaction(db, scope, async (client) => {
@@ -79,5 +118,63 @@ export async function listAssessmentWorkspace(principal: Principal): Promise<Ass
       [viewer, scope.userId],
     );
     return rows.map((row) => ({ ...toAssessment(row), itemCount: num(row.item_count), attemptCount: num(row.attempt_count), pendingMarking: 0 }));
+  }, { readOnly: true });
+}
+
+export async function listAuthorQuestions(principal: Principal): Promise<AuthorQuestionSummary[]> {
+  if (!principal.roles.some((role) => role === "tenant_admin" || role === "tna_analyst")) return [];
+  const scope = scopeForPrincipal(principal);
+  const roots = pathsToLtree(scope.orgScopes);
+  return withTenantTransaction(await pool(), scope, async (client) => {
+    const { rows } = await client.query(
+      `SELECT q.id,q.bank_id,b.name AS bank_name,q.question_type,q.prompt,q.options,q.answer_key,q.rationale,
+              q.points::float8 AS points,q.difficulty,q.bloom_level,q.origin,q.review_status
+         FROM osa.assessment_questions q
+         JOIN osa.question_banks b ON b.tenant_id=q.tenant_id AND b.id=q.bank_id
+         JOIN osa.org_units ou ON ou.tenant_id=b.tenant_id AND ou.id=b.org_unit_id
+        WHERE ou.path <@ ANY($1::ltree[])
+        ORDER BY q.updated_at DESC`,
+      [roots],
+    );
+    return rows.map((row) => ({
+      id: String(row.id), bankId: String(row.bank_id), bankName: String(row.bank_name),
+      questionType: String(row.question_type) as QuestionType, prompt: String(row.prompt), options: row.options,
+      answerKey: row.answer_key, rationale: String(row.rationale ?? ""), points: num(row.points), difficulty: num(row.difficulty),
+      bloomLevel: String(row.bloom_level) as BloomLevel, origin: String(row.origin) as AuthorQuestionSummary["origin"],
+      reviewStatus: String(row.review_status) as AuthorQuestionSummary["reviewStatus"],
+    }));
+  }, { readOnly: true });
+}
+
+export async function listMarkingQueue(principal: Principal): Promise<MarkingQueueItem[]> {
+  if (!principal.roles.some((role) => role === "tenant_admin" || role === "assessor")) return [];
+  const scope = scopeForPrincipal(principal);
+  const roots = pathsToLtree(scope.orgScopes);
+  return withTenantTransaction(await pool(), scope, async (client) => {
+    const { rows } = await client.query(
+      `SELECT r.id AS response_id,r.attempt_id,x.assessment_id,a.code AS assessment_code,a.title AS assessment_title,
+              x.subject_user_id,u.display_name AS learner_name,u.email::text AS learner_email,
+              r.question_id,q.question_type,q.prompt,r.response,q.answer_key,q.rationale,
+              coalesce(i.points_override,q.points)::float8 AS max_points,x.submitted_at
+         FROM osa.assessment_responses r
+         JOIN osa.assessment_attempts x ON x.tenant_id=r.tenant_id AND x.id=r.attempt_id
+         JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
+         JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
+         JOIN osa.users u ON u.tenant_id=x.tenant_id AND u.id=x.subject_user_id
+         JOIN osa.assessment_questions q ON q.tenant_id=r.tenant_id AND q.id=r.question_id
+         JOIN osa.assessment_items i ON i.tenant_id=x.tenant_id AND i.assessment_id=x.assessment_id AND i.question_id=r.question_id
+        WHERE x.status='submitted'
+          AND r.final_score IS NULL
+          AND ou.path <@ ANY($1::ltree[])
+        ORDER BY x.submitted_at,a.title,u.display_name,i.position`,
+      [roots],
+    );
+    return rows.map((row) => ({
+      responseId: String(row.response_id), attemptId: String(row.attempt_id), assessmentId: String(row.assessment_id),
+      assessmentCode: String(row.assessment_code), assessmentTitle: String(row.assessment_title), learnerId: String(row.subject_user_id),
+      learnerName: String(row.learner_name), learnerEmail: String(row.learner_email), questionId: String(row.question_id),
+      questionType: String(row.question_type) as QuestionType, prompt: String(row.prompt), response: row.response,
+      answerKey: row.answer_key, rationale: String(row.rationale ?? ""), maxPoints: num(row.max_points), submittedAt: iso(row.submitted_at),
+    }));
   }, { readOnly: true });
 }
