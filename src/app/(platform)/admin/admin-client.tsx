@@ -52,8 +52,9 @@ export function TenantAdminClient({
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<"user" | "org" | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resettingUserId, setResettingUserId] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [handoff, setHandoff] = useState<{ name: string; email: string; password: string } | null>(null);
+  const [handoff, setHandoff] = useState<{ name: string; email: string; password: string; reset?: boolean } | null>(null);
   const root = organizations.find((org) => !org.parentId) ?? organizations[0];
   const [userForm, setUserForm] = useState({
     displayName: "",
@@ -166,6 +167,29 @@ export function TenantAdminClient({
     }
   }
 
+  async function resetPassword(user: TenantAdminUser) {
+    const approved = window.confirm(`Reset the password for ${user.displayName}? All of this user's active sessions will be revoked.`);
+    if (!approved) return;
+    const password = generatedPassword();
+    setResettingUserId(user.id);
+    setError("");
+    try {
+      const response = await fetch("/api/admin/users", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify({ action: "reset_password", userId: user.id, password }),
+      });
+      const payload = await response.json() as ApiProblem & { ok?: boolean; revokedSessions?: number };
+      if (!response.ok || !payload.ok) throw new Error(messageOf(payload, "Unable to reset password"));
+      setHandoff({ name: user.displayName, email: user.email, password, reset: true });
+      setModal("user");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to reset password");
+    } finally {
+      setResettingUserId(null);
+    }
+  }
+
   return <div className={styles.page}>
     <section className={styles.hero}>
       <div className={styles.heroText}>
@@ -201,14 +225,17 @@ export function TenantAdminClient({
         filteredUsers.length === 0 ? <div className={styles.empty}><strong>No people match this view.</strong>Add a user or clear the current search.</div> :
         <div className={styles.tableWrap}>
           <table className={styles.table}>
-            <thead><tr><th>Person</th><th>Organization</th><th>Roles</th><th>Status</th><th>Created</th><th></th></tr></thead>
+            <thead><tr><th>Person</th><th>Organization</th><th>Roles</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
             <tbody>{filteredUsers.map((user) => <tr key={user.id}>
               <td><div className={styles.person}><div className={styles.avatar}>{initials(user.displayName)}</div><div><strong>{user.displayName}</strong><span>{user.email}</span></div></div></td>
               <td>{user.orgUnitName}</td>
               <td><div className={styles.roles}>{user.roles.map((role) => <span className={styles.role} key={role}>{ROLE_LABEL[role]}</span>)}</div></td>
               <td><span className={user.active ? styles.state : styles.stateOff}>{user.active ? "Active" : "Inactive"}</span></td>
               <td>{user.createdAt.slice(0,10)}</td>
-              <td><button className={styles.ghost} type="button" disabled={user.id === currentUserId && user.active} onClick={() => toggleActive(user)}>{user.active ? "Deactivate" : "Activate"}</button></td>
+              <td><div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className={styles.ghost} type="button" disabled={resettingUserId === user.id} onClick={() => resetPassword(user)}>{resettingUserId === user.id ? "Resetting…" : "Reset password"}</button>
+                <button className={styles.ghost} type="button" disabled={user.id === currentUserId && user.active} onClick={() => toggleActive(user)}>{user.active ? "Deactivate" : "Activate"}</button>
+              </div></td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -230,13 +257,13 @@ export function TenantAdminClient({
     {modal ? <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}>
       <section className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
         <header className={styles.modalHeader}>
-          <div><h2 id="admin-modal-title">{modal === "user" ? (handoff ? "User ready" : "Add a user") : "Add an organization"}</h2><p>{modal === "user" ? "Create a real tenant account with delegated organizational scope." : "Extend the tenant hierarchy below an organization already in your scope."}</p></div>
+          <div><h2 id="admin-modal-title">{modal === "user" ? (handoff ? "Credentials ready" : "Add a user") : "Add an organization"}</h2><p>{modal === "user" ? (handoff?.reset ? "The previous password and sessions are no longer usable. Hand these new temporary credentials to the user." : "Create a real tenant account with delegated organizational scope.") : "Extend the tenant hierarchy below an organization already in your scope."}</p></div>
           <button className={styles.iconButton} type="button" onClick={() => setModal(null)} aria-label="Close">×</button>
         </header>
         {modal === "user" ? (
           <div className={styles.modalBody}>
             {handoff ? <div className={styles.success}>
-              <strong>{handoff.name}</strong> is ready to sign in.<br/>
+              <strong>{handoff.name}</strong> {handoff.reset ? "has a new temporary password." : "is ready to sign in."}<br/>
               Email: <strong>{handoff.email}</strong><br/>
               Temporary password: <strong>{handoff.password}</strong><br/><br/>
               <button className={styles.secondary} type="button" onClick={() => navigator.clipboard.writeText(`Email: ${handoff.email}\nTemporary password: ${handoff.password}`)}>Copy credentials</button>
