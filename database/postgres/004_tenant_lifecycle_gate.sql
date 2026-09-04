@@ -53,18 +53,44 @@ AS $$
   )
 $$;
 
--- Keep the detail function private to known application roles. The boolean gate
--- is invoked from RLS policies themselves and is safe to execute with no input:
--- it exposes only whether the caller's already-established tenant may run.
+-- The platform control plane needs one narrow cross-tenant action when tenant
+-- state changes: revoke all existing sessions so a suspended account cannot
+-- resume later with an old cookie after reactivation. The function can delete
+-- sessions for exactly the supplied tenant and returns only a count.
+CREATE OR REPLACE FUNCTION osa.revoke_tenant_sessions(p_tenant_id uuid)
+RETURNS bigint
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = osa, pg_catalog
+AS $$
+  WITH deleted AS (
+    DELETE FROM osa.sessions
+     WHERE tenant_id = p_tenant_id
+    RETURNING 1
+  )
+  SELECT count(*)::bigint FROM deleted
+$$;
+
+-- Keep state details and cross-tenant session revocation private. The boolean
+-- gate is invoked by RLS itself and reveals only whether the caller's already-
+-- established tenant is enabled.
 REVOKE ALL ON FUNCTION osa.runtime_tenant_control() FROM PUBLIC;
+REVOKE ALL ON FUNCTION osa.revoke_tenant_sessions(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION osa.tenant_runtime_enabled() TO PUBLIC;
 
-DO $grant_runtime$
+DO $grant_known_roles$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_app') THEN
     GRANT EXECUTE ON FUNCTION osa.runtime_tenant_control() TO ik_osa_app;
   END IF;
-END $grant_runtime$;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_control_plane') THEN
+    GRANT EXECUTE ON FUNCTION osa.revoke_tenant_sessions(uuid) TO ik_osa_control_plane;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_control_plane_runtime') THEN
+    GRANT EXECUTE ON FUNCTION osa.revoke_tenant_sessions(uuid) TO ik_osa_control_plane_runtime;
+  END IF;
+END $grant_known_roles$;
 
 -- Strengthen every existing tenant policy. The session resolver keeps its own
 -- dedicated SELECT-only escape policy on osa.sessions; normal runtime traffic
@@ -106,6 +132,7 @@ COMMIT;
 --!     );
 --!   END LOOP;
 --! END $rollback_rls$;
+--! DROP FUNCTION IF EXISTS osa.revoke_tenant_sessions(uuid);
 --! DROP FUNCTION IF EXISTS osa.runtime_tenant_control();
 --! DROP FUNCTION IF EXISTS osa.tenant_runtime_enabled();
 --! COMMIT;
