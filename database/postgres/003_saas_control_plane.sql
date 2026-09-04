@@ -1,11 +1,13 @@
 -- iK / Project NOVA — migration 003: SaaS control plane.
 --
--- This migration deliberately keeps cross-tenant SaaS administration OUTSIDE
--- the tenant runtime connection. The application must use a dedicated
--- CONTROL_PLANE_DATABASE_URL whose role is provisioned with the grants below.
--- That role remains NOSUPERUSER/NOBYPASSRLS and owns no tenant table. Tenant
--- creation works by inserting the global tenant row first, then setting
--- app.tenant_id inside the same transaction before touching forced-RLS tables.
+-- This migration creates GLOBAL SaaS control-plane state only. It deliberately
+-- does not create login roles or embed credentials. Provision the dedicated
+-- `ik_osa_control_plane` login role out-of-band and grant the narrow privileges
+-- documented in docs/CONTROL_PLANE_PROVISIONING.md.
+--
+-- Tenant runtime remains separate and NOBYPASSRLS. Tenant creation inserts the
+-- global tenant row first, then sets app.tenant_id inside the same transaction
+-- before writing org_units/users/user_roles, so forced RLS remains effective.
 
 BEGIN;
 
@@ -63,60 +65,13 @@ CREATE TABLE osa.platform_audit_events (
 );
 CREATE INDEX platform_audit_time ON osa.platform_audit_events(occurred_at DESC);
 
-CREATE FUNCTION osa.prevent_platform_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS
-$$ BEGIN RAISE EXCEPTION 'platform_audit_events are append-only'; END $$;
+CREATE FUNCTION osa.prevent_platform_audit_mutation() RETURNS trigger
+LANGUAGE plpgsql
+AS 'BEGIN RAISE EXCEPTION ''platform_audit_events are append-only''; END';
+
 CREATE TRIGGER platform_audit_no_update_delete
   BEFORE UPDATE OR DELETE ON osa.platform_audit_events
   FOR EACH ROW EXECUTE FUNCTION osa.prevent_platform_audit_mutation();
-
--- Existing demo tenants pre-date the control plane. Register them so the new
--- dashboard can show them without inventing commercial history.
-DO $backfill$
-DECLARE bootstrap_operator uuid;
-BEGIN
-  SELECT id INTO bootstrap_operator FROM osa.platform_operators ORDER BY created_at LIMIT 1;
-  -- No operator normally exists at migration time; the app bootstrap inserts
-  -- one at first platform login. Therefore no tenant_control rows are created
-  -- here. Existing tenants remain intentionally absent until claimed by the
-  -- owner, and list queries only expose managed tenants.
-  PERFORM bootstrap_operator;
-END $backfill$;
-
--- Dedicated control-plane role grants. The login role itself is provisioned
--- outside version control because its password belongs in secret storage.
--- Before running this migration, optionally set:
---   SET osa.control_plane_role = 'ik_osa_control_plane';
--- The default is ik_osa_control_plane.
-DO $control_grants$
-DECLARE
-  control_role text := coalesce(nullif(current_setting('osa.control_plane_role', true), ''), 'ik_osa_control_plane');
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = control_role) THEN
-    RAISE NOTICE 'Control-plane role % does not exist; skipping grants. Provision it and re-run this grant block.', control_role;
-    RETURN;
-  END IF;
-
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = control_role AND (rolsuper OR rolbypassrls)) THEN
-    RAISE EXCEPTION 'Control-plane role % must be NOSUPERUSER and NOBYPASSRLS.', control_role;
-  END IF;
-
-  EXECUTE format('GRANT USAGE ON SCHEMA osa TO %I', control_role);
-  EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA osa TO %I', control_role);
-
-  -- Global control-plane records.
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE ON osa.platform_operators TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON osa.platform_sessions TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE ON osa.tenant_control TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT ON osa.platform_audit_events TO %I', control_role);
-
-  -- Tenant provisioning. Forced RLS remains in force for the tenant tables;
-  -- callers must SET LOCAL app.tenant_id to the newly created tenant.
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE ON osa.tenants TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE ON osa.org_units TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE ON osa.users TO %I', control_role);
-  EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON osa.user_roles TO %I', control_role);
-  EXECUTE format('GRANT EXECUTE ON FUNCTION osa.current_tenant_id() TO %I', control_role);
-END $control_grants$;
 
 COMMIT;
 
