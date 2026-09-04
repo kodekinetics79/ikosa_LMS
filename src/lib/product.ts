@@ -14,7 +14,7 @@ export const product = {
  * and is rendered only for tenant administrators.
  */
 export const primaryNavigation = [
-  { href: "/", label: "Readiness home", icon: "home" },
+  { href: "/workspace", label: "Workspace home", icon: "home" },
   { href: "/signals", label: "Signal inbox", icon: "signal" },
   { href: "/studies", label: "TNA studies", icon: "study" },
   { href: "/learning", label: "My learning", icon: "learning" },
