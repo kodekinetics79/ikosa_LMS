@@ -20,8 +20,6 @@ export type OrgUnit = {
 
 export type PlatformRole =
   | "tenant_admin"
-  | "learning_admin"
-  | "instructor"
   | "tna_analyst"
   | "manager"
   | "assessor"
@@ -257,9 +255,7 @@ export type Notification = {
   resolvedAt: string | null;
 };
 
-/* Assessment types are PostgreSQL-only during the P1 cutover. They are not
- * added to the legacy JSON Database aggregate; new assessment routes must use
- * the RLS-backed assessment store directly. */
+/* Assessment entities are PostgreSQL-only during the P1 cutover. */
 export type QuestionType =
   | "single_choice"
   | "multiple_choice"
