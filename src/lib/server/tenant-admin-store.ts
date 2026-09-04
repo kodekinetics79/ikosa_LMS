@@ -1,7 +1,7 @@
 import "server-only";
 
 import { hashPassword } from "./security";
-import type { PlatformRole, User } from "./domain";
+import type { AuditEvent, PlatformRole } from "./domain";
 import type { Principal } from "./auth";
 import { scopeForPrincipal } from "./tenant-runtime";
 import {
@@ -13,6 +13,8 @@ import {
   type PoolClient,
 } from "./db/driver";
 import { newId } from "./db/ids";
+import { signAuditEvent } from "./db/audit-chain";
+import * as map from "./db/mapping";
 
 export type TenantAdminOrgUnit = {
   id: string;
@@ -41,12 +43,14 @@ export type CreateTenantUserInput = {
   orgUnitId: string;
   password: string;
   roles: PlatformRole[];
+  requestId: string;
 };
 
 export type CreateTenantOrgInput = {
   parentId: string;
   code: string;
   name: string;
+  requestId: string;
 };
 
 let poolPromise: Promise<Pool> | null = null;
@@ -90,6 +94,55 @@ function asRoles(value: unknown): PlatformRole[] {
 
 function asPaths(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
+}
+
+/**
+ * Append to the normal tenant audit chain INSIDE the same transaction as the
+ * administration change. A user/org mutation without its audit event is not an
+ * acceptable partial success, and a second transaction leaves exactly that
+ * crash window.
+ */
+async function appendTenantAudit(
+  client: PoolClient,
+  principal: Principal,
+  requestId: string,
+  action: string,
+  resourceType: string,
+  resourceId: string,
+  metadata: AuditEvent["metadata"],
+): Promise<void> {
+  const scope = scopeForPrincipal(principal);
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`osa.audit:${scope.tenantId}`]);
+  const { rows } = await client.query(
+    `SELECT a.id, a.tenant_id, a.actor_user_id, a.action, a.resource_type, a.resource_id, a.outcome,
+            a.occurred_at, a.request_id, a.metadata, a.previous_hash, a.event_hash
+       FROM osa.audit_events a
+      ORDER BY a.sequence DESC
+      LIMIT 1`,
+  );
+  const head = rows[0] ? map.toAuditEvent(rows[0]) : null;
+  const event = signAuditEvent(head, {
+    tenantId: scope.tenantId,
+    actorUserId: scope.userId,
+    action,
+    resourceType,
+    resourceId,
+    outcome: "success",
+    requestId,
+    metadata,
+  });
+  await client.query(
+    `INSERT INTO osa.audit_events
+      (id, tenant_id, actor_user_id, action, resource_type, resource_id,
+       outcome, request_id, metadata, occurred_at, previous_hash, event_hash)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid,
+             $7, $8, $9::jsonb, $10::timestamptz, $11, $12)`,
+    [
+      event.id, event.tenantId, event.actorUserId, event.action, event.resourceType,
+      event.resourceId, event.outcome, event.requestId, JSON.stringify(event.metadata),
+      event.occurredAt, map.hashToBytes(event.previousHash), map.hashToBytes(event.hash),
+    ],
+  );
 }
 
 export async function listTenantOrgUnits(principal: Principal): Promise<TenantAdminOrgUnit[]> {
@@ -165,6 +218,10 @@ export async function createTenantOrgUnit(principal: Principal, input: CreateTen
        RETURNING id::text, parent_id::text, code, name, path::text`,
       [id, scope.tenantId, input.parentId, input.code, input.name, path],
     );
+    await appendTenantAudit(client, principal, input.requestId, "tenant.organization.create", "org_unit", id, {
+      code: input.code,
+      parentId: input.parentId,
+    });
     const row = created.rows[0];
     return { id: row.id, parentId: row.parent_id, code: row.code, name: row.name, path: row.path, memberCount: 0 };
   });
@@ -199,6 +256,12 @@ export async function createTenantUser(principal: Principal, input: CreateTenant
       );
     }
 
+    await appendTenantAudit(client, principal, input.requestId, "tenant.user.create", "user", id, {
+      email: input.email,
+      orgUnitId: input.orgUnitId,
+      roles: input.roles.join(","),
+    });
+
     const row = created.rows[0];
     return {
       id: row.id,
@@ -214,7 +277,7 @@ export async function createTenantUser(principal: Principal, input: CreateTenant
   });
 }
 
-export async function setTenantUserActive(principal: Principal, userId: string, active: boolean): Promise<void> {
+export async function setTenantUserActive(principal: Principal, userId: string, active: boolean, requestId: string): Promise<void> {
   requireTenantAdmin(principal);
   if (userId === principal.user.id && !active) throw new Error("You cannot deactivate your own tenant administrator account");
   await write(principal, async (client) => {
@@ -231,6 +294,15 @@ export async function setTenantUserActive(principal: Principal, userId: string, 
     );
     if (!result.rowCount) throw new Error("User not found in your delegated scope");
     if (!active) await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid", [userId]);
+    await appendTenantAudit(
+      client,
+      principal,
+      requestId,
+      active ? "tenant.user.activate" : "tenant.user.deactivate",
+      "user",
+      userId,
+      { active },
+    );
   });
 }
 
