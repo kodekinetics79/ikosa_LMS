@@ -7,12 +7,13 @@
 --
 -- Backward compatibility: tenants with no osa.tenant_control row are considered
 -- unmanaged and remain enabled during the control-plane rollout.
+--
+-- Role-specific EXECUTE grants are intentionally provisioned out-of-band. They
+-- depend on deployment role names and credentials and do not belong in a schema
+-- migration. See docs/CONTROL_PLANE_PROVISIONING.md.
 
 BEGIN;
 
--- Narrow commercial-state reader for the tenant already established through
--- app.tenant_id. The runtime receives no SELECT privilege on the global
--- osa.tenant_control portfolio.
 CREATE OR REPLACE FUNCTION osa.runtime_tenant_control()
 RETURNS TABLE (
   state text,
@@ -29,9 +30,6 @@ AS $$
    WHERE c.tenant_id = osa.current_tenant_id()
 $$;
 
--- Boolean gate used by every tenant RLS policy. No control row means legacy /
--- unmanaged and therefore allowed. Managed tenants are allowed only while
--- active, or during an unexpired trial.
 CREATE OR REPLACE FUNCTION osa.tenant_runtime_enabled()
 RETURNS boolean
 LANGUAGE sql
@@ -53,10 +51,6 @@ AS $$
   )
 $$;
 
--- The platform control plane needs one narrow cross-tenant action when tenant
--- state changes: revoke all existing sessions so a suspended account cannot
--- resume later with an old cookie after reactivation. The function can delete
--- sessions for exactly the supplied tenant and returns only a count.
 CREATE OR REPLACE FUNCTION osa.revoke_tenant_sessions(p_tenant_id uuid)
 RETURNS bigint
 LANGUAGE sql
@@ -72,67 +66,40 @@ AS $$
   SELECT count(*)::bigint FROM deleted
 $$;
 
--- Keep state details and cross-tenant session revocation private. The boolean
--- gate is invoked by RLS itself and reveals only whether the caller's already-
--- established tenant is enabled.
 REVOKE ALL ON FUNCTION osa.runtime_tenant_control() FROM PUBLIC;
 REVOKE ALL ON FUNCTION osa.revoke_tenant_sessions(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION osa.tenant_runtime_enabled() TO PUBLIC;
 
-DO $grant_known_roles$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_app') THEN
-    GRANT EXECUTE ON FUNCTION osa.runtime_tenant_control() TO ik_osa_app;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_control_plane') THEN
-    GRANT EXECUTE ON FUNCTION osa.revoke_tenant_sessions(uuid) TO ik_osa_control_plane;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ik_osa_control_plane_runtime') THEN
-    GRANT EXECUTE ON FUNCTION osa.revoke_tenant_sessions(uuid) TO ik_osa_control_plane_runtime;
-  END IF;
-END $grant_known_roles$;
-
--- Strengthen every existing tenant policy. The session resolver keeps its own
--- dedicated SELECT-only escape policy on osa.sessions; normal runtime traffic
--- still passes through tenant_isolation and therefore this lifecycle gate.
-DO $lifecycle_rls$
-DECLARE t text;
-BEGIN
-  FOREACH t IN ARRAY ARRAY[
-    'org_units','users','user_roles','sessions','job_roles','skills','requirements',
-    'tna_studies','tna_target_roles','evidence','gap_cases','interventions','audit_events',
-    'courses','course_modules','enrollments','module_completions','signals',
-    'signal_job_roles','signal_skills','notifications'
-  ]
-  LOOP
-    EXECUTE format(
-      'ALTER POLICY tenant_isolation ON osa.%I USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled())',
-      t
-    );
-  END LOOP;
-END $lifecycle_rls$;
+-- Strengthen the policies explicitly rather than dynamically. This is verbose
+-- on purpose: managed Postgres migration runners often split or reject DO blocks
+-- containing nested dollar quotes, and release migrations must be portable.
+ALTER POLICY tenant_isolation ON osa.org_units USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.users USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.user_roles USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.sessions USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.job_roles USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.skills USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.requirements USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.tna_studies USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.tna_target_roles USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.evidence USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.gap_cases USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.interventions USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.audit_events USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.courses USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.course_modules USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.enrollments USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.module_completions USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.signals USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.signal_job_roles USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.signal_skills USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
+ALTER POLICY tenant_isolation ON osa.notifications USING (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled()) WITH CHECK (tenant_id = osa.current_tenant_id() AND osa.tenant_runtime_enabled());
 
 COMMIT;
 
--- ROLLBACK
---! BEGIN;
---! DO $rollback_rls$
---! DECLARE t text;
---! BEGIN
---!   FOREACH t IN ARRAY ARRAY[
---!     'org_units','users','user_roles','sessions','job_roles','skills','requirements',
---!     'tna_studies','tna_target_roles','evidence','gap_cases','interventions','audit_events',
---!     'courses','course_modules','enrollments','module_completions','signals',
---!     'signal_job_roles','signal_skills','notifications'
---!   ]
---!   LOOP
---!     EXECUTE format(
---!       'ALTER POLICY tenant_isolation ON osa.%I USING (tenant_id = osa.current_tenant_id()) WITH CHECK (tenant_id = osa.current_tenant_id())',
---!       t
---!     );
---!   END LOOP;
---! END $rollback_rls$;
---! DROP FUNCTION IF EXISTS osa.revoke_tenant_sessions(uuid);
---! DROP FUNCTION IF EXISTS osa.runtime_tenant_control();
---! DROP FUNCTION IF EXISTS osa.tenant_runtime_enabled();
---! COMMIT;
+-- ROLLBACK is intentionally documented, not auto-executed.
+-- Restore each tenant_isolation policy to:
+--   USING (tenant_id = osa.current_tenant_id())
+--   WITH CHECK (tenant_id = osa.current_tenant_id())
+-- then drop osa.revoke_tenant_sessions(uuid), osa.runtime_tenant_control(), and
+-- osa.tenant_runtime_enabled().
