@@ -1,7 +1,7 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import type { PlatformRole } from "@/lib/server/domain";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
-import { createTenantUser, listTenantUsers, setTenantUserActive } from "@/lib/server/tenant-admin-store";
+import { createTenantUser, listTenantUsers, resetTenantUserPassword, setTenantUserActive } from "@/lib/server/tenant-admin-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,6 +68,14 @@ export async function PATCH(request: Request): Promise<Response> {
     assertCsrf(request, principal);
     const body = await objectBody(request);
     const userId = requiredString(body, "userId", 100);
+
+    if (body.action === "reset_password") {
+      const password = requiredString(body, "password", 256);
+      if (password.length < 12) throw new ValidationError("Validation failed", { password: "Temporary password must be at least 12 characters" });
+      const result = await resetTenantUserPassword(principal, userId, password, rid);
+      return json({ ok: true, ...result });
+    }
+
     if (typeof body.active !== "boolean") throw new ValidationError("Validation failed", { active: "Active state must be true or false" });
     await setTenantUserActive(principal, userId, body.active, rid);
     return json({ ok: true, userId, active: body.active });
