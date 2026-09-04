@@ -10,6 +10,7 @@ export const Icons = {
   home: (p: IconProps) => <Icon {...p}><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z" /></Icon>,
   signal: (p: IconProps) => <Icon {...p}><path d="M4 18v-3m5 3V9m5 9V6m5 12V3" /></Icon>,
   study: (p: IconProps) => <Icon {...p}><path d="M4 4h16v16H4zM8 9h8M8 13h5" /></Icon>,
+  assessment: (p: IconProps) => <Icon {...p}><path d="M7 3h10l2 2v16H5V3z"/><path d="M9 8h6M9 12h3M9 16h2M14.5 15.5l1.3 1.3 2.7-3"/></Icon>,
   evidence: (p: IconProps) => <Icon {...p}><path d="M6 3h9l3 3v15H6zM9 12l2 2 4-5" /></Icon>,
   action: (p: IconProps) => <Icon {...p}><path d="M5 12h14M13 6l6 6-6 6" /></Icon>,
   audit: (p: IconProps) => <Icon {...p}><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4M8 11l2 2 4-5" /></Icon>,

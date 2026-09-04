@@ -15,13 +15,14 @@ export const product = {
  */
 export const primaryNavigation = [
   { href: "/workspace", label: "Workspace home", icon: "home" },
+  { href: "/learning", label: "My learning", icon: "learning" },
+  { href: "/assessments", label: "Assessments", icon: "assessment" },
+  { href: "/catalog", label: "Catalogue", icon: "catalog" },
   { href: "/signals", label: "Signal inbox", icon: "signal" },
   { href: "/studies", label: "TNA studies", icon: "study" },
-  { href: "/learning", label: "My learning", icon: "learning" },
-  { href: "/catalog", label: "Catalogue", icon: "catalog" },
-  { href: "/notifications", label: "Notifications", icon: "bell" },
   { href: "/evidence", label: "Evidence", icon: "evidence" },
   { href: "/interventions", label: "Interventions", icon: "action" },
+  { href: "/notifications", label: "Notifications", icon: "bell" },
   { href: "/audit", label: "Audit room", icon: "audit" },
   { href: "/admin", label: "Tenant admin", icon: "admin", tenantAdminOnly: true },
 ] as const;
