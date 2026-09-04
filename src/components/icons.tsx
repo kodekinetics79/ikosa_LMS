@@ -13,6 +13,7 @@ export const Icons = {
   evidence: (p: IconProps) => <Icon {...p}><path d="M6 3h9l3 3v15H6zM9 12l2 2 4-5" /></Icon>,
   action: (p: IconProps) => <Icon {...p}><path d="M5 12h14M13 6l6 6-6 6" /></Icon>,
   audit: (p: IconProps) => <Icon {...p}><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4M8 11l2 2 4-5" /></Icon>,
+  admin: (p: IconProps) => <Icon {...p}><circle cx="12" cy="8" r="3"/><path d="M6 20v-2a6 6 0 0 1 12 0v2M18 6l2-1M18 10l2 1M6 6 4 5" /></Icon>,
   search: (p: IconProps) => <Icon {...p}><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4" /></Icon>,
   bell: (p: IconProps) => <Icon {...p}><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></Icon>,
   chevron: (p: IconProps) => <Icon {...p}><path d="m9 18 6-6-6-6" /></Icon>,
