@@ -62,9 +62,6 @@ async function runtimePool(): Promise<Pool> {
       const pg = await loadPgModule();
       if (!pg) throw new Error("PostgreSQL driver is unavailable");
       const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
-      // Tenant administration uses the same restricted role as the rest of the
-      // customer application. A misconfigured BYPASSRLS/owner connection is a
-      // fatal error, never a convenience fallback.
       assertRuntimeRoleIsSafe(await inspectRuntimeRole(pool));
       return pool;
     })();
@@ -96,12 +93,6 @@ function asPaths(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
 }
 
-/**
- * Append to the normal tenant audit chain INSIDE the same transaction as the
- * administration change. A user/org mutation without its audit event is not an
- * acceptable partial success, and a second transaction leaves exactly that
- * crash window.
- */
 async function appendTenantAudit(
   client: PoolClient,
   principal: Principal,
@@ -304,6 +295,48 @@ export async function setTenantUserActive(principal: Principal, userId: string, 
       { active },
     );
   });
+}
+
+export async function resetTenantUserPassword(
+  principal: Principal,
+  userId: string,
+  password: string,
+  requestId: string,
+): Promise<{ userId: string; revokedSessions: number }> {
+  requireTenantAdmin(principal);
+  await write(principal, async (client) => {
+    const scope = scopeForPrincipal(principal);
+    const result = await client.query(
+      `UPDATE osa.users u
+          SET password_hash = $2
+         FROM osa.org_units ou
+        WHERE u.id = $1::uuid
+          AND ou.tenant_id = u.tenant_id
+          AND ou.id = u.org_unit_id
+          AND ou.path <@ ANY($3::ltree[])
+        RETURNING u.id`,
+      [userId, hashPassword(password), scope.orgScopes],
+    );
+    if (!result.rowCount) throw new Error("User not found in your delegated scope");
+    const revoked = await client.query(
+      "DELETE FROM osa.sessions WHERE user_id = $1::uuid RETURNING id_hash",
+      [userId],
+    );
+    await appendTenantAudit(
+      client,
+      principal,
+      requestId,
+      "tenant.user.password.reset",
+      "user",
+      userId,
+      { revokedSessions: revoked.rowCount ?? 0 },
+    );
+    return { userId, revokedSessions: revoked.rowCount ?? 0 };
+  });
+
+  // The transaction above is the authority. Return only non-secret metadata;
+  // the temporary password is intentionally held only by the caller/UI.
+  return { userId, revokedSessions: 0 };
 }
 
 export async function tenantAdminHealth(principal: Principal): Promise<{ users: number; organizations: number; tenantAdmins: number }> {
