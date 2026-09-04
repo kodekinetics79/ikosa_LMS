@@ -1,5 +1,6 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
-import { gradeAssessmentResponse, startAssessmentAttempt, submitAssessmentAttempt } from "@/lib/server/assessment-store";
+import { gradeAssessmentResponse, submitAssessmentAttempt } from "@/lib/server/assessment-store";
+import { startAssessmentAttemptIdempotent } from "@/lib/server/assessment-attempt-start";
 import { saveTimedAssessmentResponse } from "@/lib/server/assessment-attempt-write-store";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
@@ -20,7 +21,7 @@ export async function POST(request: Request): Promise<Response> {
     requireLearner(principal.roles);
     assertCsrf(request, principal);
     const body = await objectBody(request);
-    const workspace = await startAssessmentAttempt(principal, requiredString(body, "assessmentId", 100), rid);
+    const workspace = await startAssessmentAttemptIdempotent(principal, requiredString(body, "assessmentId", 100), rid);
     return json(workspace, { status: 201 });
   } catch (error) { return problem(error, rid); }
 }
