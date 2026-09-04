@@ -12,8 +12,8 @@ import { primaryNavigation } from "@/lib/product";
 // key onto a component, so the two can never drift apart.
 const iconFor: Record<string, (props: React.SVGProps<SVGSVGElement>) => React.ReactElement> = {
   home: Icons.home, signal: Icons.signal, study: Icons.study, learning: Icons.learning,
-  catalog: Icons.catalog, evidence: Icons.evidence, action: Icons.action, audit: Icons.audit,
-  bell: Icons.bell, admin: Icons.admin,
+  assessment: Icons.assessment, catalog: Icons.catalog, evidence: Icons.evidence,
+  action: Icons.action, audit: Icons.audit, bell: Icons.bell, admin: Icons.admin,
 };
 const nav = primaryNavigation.map((item) => ({ ...item, icon: iconFor[item.icon] ?? Icons.home }));
 
