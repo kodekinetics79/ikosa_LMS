@@ -1,5 +1,6 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import { createAssessmentQuestion } from "@/lib/server/assessment-store";
+import { listAuthorQuestions } from "@/lib/server/assessment-list-store";
 import type { BloomLevel, QuestionType } from "@/lib/server/domain";
 import { json, objectBody, optionalEnum, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
@@ -11,6 +12,15 @@ const BLOOM = ["remember","understand","apply","analyze","evaluate","create"] as
 
 function requireAuthor(roles: readonly string[]): void {
   if (!roles.some((role) => role === "tenant_admin" || role === "tna_analyst")) throw new AuthError(403, "Assessment authoring permission required");
+}
+
+export async function GET(request: Request): Promise<Response> {
+  const rid = requestId(request);
+  try {
+    const principal = await principalFromRequest(request);
+    requireAuthor(principal.roles);
+    return json({ items: await listAuthorQuestions(principal), asOf: new Date().toISOString() });
+  } catch (error) { return problem(error, rid); }
 }
 
 export async function POST(request: Request): Promise<Response> {
