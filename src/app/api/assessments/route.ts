@@ -1,5 +1,6 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
-import { addQuestionToAssessment, createAssessment, listAssessments, publishAssessment } from "@/lib/server/assessment-store";
+import { addQuestionToAssessment, createAssessment, publishAssessment } from "@/lib/server/assessment-store";
+import { listAssessmentWorkspace } from "@/lib/server/assessment-list-store";
 import { json, objectBody, optionalEnum, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
 export const runtime = "nodejs";
@@ -19,7 +20,7 @@ export async function GET(request: Request): Promise<Response> {
   const rid = requestId(request);
   try {
     const principal = await principalFromRequest(request);
-    return json({ items: await listAssessments(principal), asOf: new Date().toISOString() });
+    return json({ items: await listAssessmentWorkspace(principal), asOf: new Date().toISOString() });
   } catch (error) { return problem(error, rid); }
 }
 
