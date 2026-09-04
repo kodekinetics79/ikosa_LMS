@@ -1,6 +1,7 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
-import { gradeAssessmentResponse, submitAssessmentAttempt } from "@/lib/server/assessment-store";
+import { gradeAssessmentResponse } from "@/lib/server/assessment-store";
 import { startAssessmentAttemptIdempotent } from "@/lib/server/assessment-attempt-start";
+import { submitAssessmentAttemptSafely } from "@/lib/server/assessment-attempt-submit-store";
 import { saveTimedAssessmentResponse } from "@/lib/server/assessment-attempt-write-store";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
@@ -47,7 +48,7 @@ export async function PATCH(request: Request): Promise<Response> {
 
     if (action === "submit") {
       requireLearner(principal.roles);
-      const attempt = await submitAssessmentAttempt(principal, requiredString(body, "attemptId", 100), rid);
+      const attempt = await submitAssessmentAttemptSafely(principal, requiredString(body, "attemptId", 100), rid);
       return json({ attempt });
     }
 
