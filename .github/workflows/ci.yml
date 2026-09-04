@@ -40,8 +40,24 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build
-      - run: HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js > /tmp/ik-osa.log 2>&1 &
-      - run: ./scripts/wait-for-http.sh http://127.0.0.1:3000/api/health 90
+      - name: Start fixture server
+        run: |
+          # Critical Playwright journeys currently exercise deterministic seeded
+          # fixtures, not a disposable PostgreSQL service. Make that explicit so
+          # the production fail-closed datastore checks are never weakened to
+          # accommodate CI and the Docker hostname in .env.example is ignored.
+          NODE_ENV=development \
+          DATABASE_URL= \
+          CONTROL_PLANE_DATABASE_URL= \
+          HOSTNAME=127.0.0.1 \
+          PORT=3000 \
+          node .next/standalone/server.js > /tmp/ik-osa.log 2>&1 &
+      - name: Wait for fixture server
+        run: |
+          if ! ./scripts/wait-for-http.sh http://127.0.0.1:3000/api/health 90; then
+            cat /tmp/ik-osa.log || true
+            exit 1
+          fi
       - run: npm run test:e2e -- --project=chromium --grep @critical
       - if: always()
         uses: actions/upload-artifact@v4
