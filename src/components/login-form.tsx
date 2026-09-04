@@ -19,10 +19,6 @@ export function LoginForm() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // PostgreSQL authentication is tenant-first by design. The workspace
-        // slug identifies the tenant directory row before the user table is
-        // touched, so login never needs a cross-tenant email search or an RLS
-        // bypass. Platform-admin handoff gives every customer this slug.
         body: JSON.stringify({
           tenantSlug: data.get("tenantSlug"),
           email: data.get("email"),
@@ -33,10 +29,8 @@ export function LoginForm() {
         setError("Unable to sign in. Check your workspace and credentials, then try again.");
         return;
       }
-      // Return the person to wherever the proxy interrupted them, but only to a
-      // path on this origin so the parameter cannot become an open redirect.
       const requested = search.get("next");
-      const destination = requested && requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
+      const destination = requested && requested.startsWith("/") && !requested.startsWith("//") ? requested : "/workspace";
       router.push(destination);
       router.refresh();
     } catch {
@@ -59,13 +53,11 @@ export function LoginForm() {
       <label>Work email
         <input type="email" name="email" autoComplete="email" required />
       </label>
-      <label><span>Password <a href="#">Forgot password?</a></span>
+      <label>Password
         <input type="password" name="password" autoComplete="current-password" required />
       </label>
       <button className="button primary full" type="submit" disabled={pending}>{pending ? "Signing in…" : "Sign in securely"}</button>
-      <div className="or"><span>or</span></div>
-      <button className="button secondary full" type="button"><span className="sso-mark">S</span>Continue with enterprise SSO</button>
-      <small className="legal">By continuing, you agree to your organization’s acceptable-use and privacy policies.</small>
+      <small className="legal">Need a password reset? Contact your tenant administrator. Enterprise SSO will appear here only after your organization has configured it.</small>
     </form>
   );
 }
