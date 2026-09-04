@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Building2, ExternalLink, LayoutDashboard, LogOut, Plus, ShieldCheck, Users, X } from "lucide-react";
-import type { PlatformModule, PlatformOperator, PlatformTenant, TenantKind } from "@/lib/server/platform-admin";
+import { Building2, ExternalLink, LayoutDashboard, LogOut, Plus, Power, RotateCcw, ShieldCheck, Users, X } from "lucide-react";
+import type { PlatformModule, PlatformOperator, PlatformTenant, TenantKind, TenantState } from "@/lib/server/platform-admin";
 import styles from "./platform-admin.module.css";
 
 const moduleCopy: Record<PlatformModule, string> = {
@@ -42,6 +42,7 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
   const [tenants, setTenants] = useState(initialTenants);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [stateChanging, setStateChanging] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [credentials, setCredentials] = useState<{ tenant: string; slug: string; email: string; password: string } | null>(null);
   const [form, setForm] = useState({
@@ -65,6 +66,7 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
     total: tenants.length,
     active: tenants.filter((tenant) => tenant.state === "active").length,
     trial: tenants.filter((tenant) => tenant.state === "trial").length,
+    suspended: tenants.filter((tenant) => tenant.state === "suspended").length,
     seats: tenants.reduce((sum, tenant) => sum + tenant.seatLimit, 0),
   }), [tenants]);
 
@@ -109,6 +111,29 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
     }
   }
 
+  async function changeTenantState(tenant: PlatformTenant, nextState: TenantState) {
+    if (nextState === "suspended") {
+      const approved = window.confirm(`Suspend ${tenant.name}? Existing tenant sessions will be revoked immediately.`);
+      if (!approved) return;
+    }
+    setStateChanging(tenant.id);
+    setError("");
+    try {
+      const response = await fetch("/api/platform-admin/tenants", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify({ tenantId: tenant.id, state: nextState }),
+      });
+      const payload = await response.json() as { state?: TenantState; error?: string };
+      if (!response.ok || !payload.state) throw new Error(payload.error ?? "Tenant state change failed");
+      setTenants((current) => current.map((item) => item.id === tenant.id ? { ...item, state: payload.state! } : item));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Tenant state change failed");
+    } finally {
+      setStateChanging(null);
+    }
+  }
+
   async function logout() {
     await fetch("/api/platform-admin/auth/logout", { method: "POST", headers: { "x-csrf-token": csrfToken } });
     window.location.assign("/platform-admin/login");
@@ -141,10 +166,12 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
             </div>
           </div>
 
+          {error ? <div className={styles.error} role="alert">{error}</div> : null}
+
           <section className={styles.metrics} aria-label="Tenant portfolio summary">
             <div className={styles.metric}><div className={styles.metricLabel}>Managed tenants</div><div className={styles.metricValue}>{stats.total}</div><div className={styles.metricSub}>Commercial control-plane records</div></div>
             <div className={styles.metric}><div className={styles.metricLabel}>Active</div><div className={styles.metricValue}>{stats.active}</div><div className={styles.metricSub}>Beyond trial state</div></div>
-            <div className={styles.metric}><div className={styles.metricLabel}>Pilot / trial</div><div className={styles.metricValue}>{stats.trial}</div><div className={styles.metricSub}>Controlled customer validation</div></div>
+            <div className={styles.metric}><div className={styles.metricLabel}>Pilot / trial</div><div className={styles.metricValue}>{stats.trial}</div><div className={styles.metricSub}>{stats.suspended ? `${stats.suspended} suspended` : "Controlled customer validation"}</div></div>
             <div className={styles.metric}><div className={styles.metricLabel}>Provisioned seats</div><div className={styles.metricValue}>{stats.seats.toLocaleString()}</div><div className={styles.metricSub}>Across the managed portfolio</div></div>
           </section>
 
@@ -158,7 +185,7 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
             ) : (
               <div className={styles.tableWrap}>
                 <table className={styles.table}>
-                  <thead><tr><th>Tenant</th><th>Type</th><th>Status</th><th>Plan</th><th>Seats</th><th>First admin</th><th>Modules</th></tr></thead>
+                  <thead><tr><th>Tenant</th><th>Type</th><th>Status</th><th>Plan</th><th>Seats</th><th>First admin</th><th>Modules</th><th>Lifecycle</th></tr></thead>
                   <tbody>
                     {tenants.map((tenant) => (
                       <tr key={tenant.id}>
@@ -169,6 +196,16 @@ export function PlatformAdminClient({ operator, csrfToken, initialTenants }: {
                         <td><Users size={13} style={{ verticalAlign: "-2px", marginRight: 5 }}/>{tenant.seatLimit.toLocaleString()}</td>
                         <td>{tenant.firstAdminEmail ?? "—"}</td>
                         <td><div className={styles.modules}>{tenant.enabledModules.slice(0, 4).map((module) => <span className={styles.moduleTag} key={module}>{module}</span>)}{tenant.enabledModules.length > 4 ? <span className={styles.moduleTag}>+{tenant.enabledModules.length - 4}</span> : null}</div></td>
+                        <td>
+                          <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+                            {tenant.state === "suspended" ? (
+                              <button className={styles.secondaryButton} type="button" disabled={stateChanging === tenant.id} onClick={() => changeTenantState(tenant, "active")}><RotateCcw size={13} style={{ verticalAlign: "-2px", marginRight: 5 }}/>{stateChanging === tenant.id ? "Working…" : "Reactivate"}</button>
+                            ) : (
+                              <button className={styles.secondaryButton} type="button" disabled={stateChanging === tenant.id} onClick={() => changeTenantState(tenant, "suspended")}><Power size={13} style={{ verticalAlign: "-2px", marginRight: 5 }}/>{stateChanging === tenant.id ? "Working…" : "Suspend"}</button>
+                            )}
+                            {tenant.state === "trial" ? <button className={styles.secondaryButton} type="button" disabled={stateChanging === tenant.id} onClick={() => changeTenantState(tenant, "active")}>Activate</button> : null}
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
