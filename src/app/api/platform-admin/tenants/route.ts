@@ -3,11 +3,11 @@ import {
   PlatformAdminError,
   assertPlatformCsrf,
   createPlatformTenant,
-  listPlatformTenants,
   platformPrincipalFromToken,
   PLATFORM_SESSION_COOKIE,
   type CreateTenantInput,
 } from "@/lib/server/platform-admin";
+import { listManagedTenants } from "@/lib/server/platform-admin-portfolio";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,7 +28,7 @@ async function principal(request: Request) {
 export async function GET(request: Request): Promise<Response> {
   try {
     await principal(request);
-    return NextResponse.json({ tenants: await listPlatformTenants() });
+    return NextResponse.json({ tenants: await listManagedTenants() });
   } catch (error) {
     const status = error instanceof PlatformAdminError ? error.status : 500;
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to load tenants" }, { status });
