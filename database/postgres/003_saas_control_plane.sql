@@ -8,6 +8,9 @@
 -- Tenant runtime remains separate and NOBYPASSRLS. Tenant creation inserts the
 -- global tenant row first, then sets app.tenant_id inside the same transaction
 -- before writing org_units/users/user_roles, so forced RLS remains effective.
+--
+-- platform_audit_events is append-only for the application by privilege: the
+-- control-plane role receives SELECT/INSERT only and never UPDATE/DELETE.
 
 BEGIN;
 
@@ -65,20 +68,10 @@ CREATE TABLE osa.platform_audit_events (
 );
 CREATE INDEX platform_audit_time ON osa.platform_audit_events(occurred_at DESC);
 
-CREATE FUNCTION osa.prevent_platform_audit_mutation() RETURNS trigger
-LANGUAGE plpgsql
-AS 'BEGIN RAISE EXCEPTION ''platform_audit_events are append-only''; END';
-
-CREATE TRIGGER platform_audit_no_update_delete
-  BEFORE UPDATE OR DELETE ON osa.platform_audit_events
-  FOR EACH ROW EXECUTE FUNCTION osa.prevent_platform_audit_mutation();
-
 COMMIT;
 
 -- ROLLBACK (destructive; export control-plane records first)
 --! BEGIN;
---! DROP TRIGGER IF EXISTS platform_audit_no_update_delete ON osa.platform_audit_events;
---! DROP FUNCTION IF EXISTS osa.prevent_platform_audit_mutation();
 --! DROP TABLE IF EXISTS osa.platform_audit_events;
 --! DROP TABLE IF EXISTS osa.tenant_control;
 --! DROP TABLE IF EXISTS osa.platform_sessions;
