@@ -1,9 +1,10 @@
 import "server-only";
 
-import { hashPassword } from "./security";
-import type { AuditEvent, PlatformRole } from "./domain";
 import type { Principal } from "./auth";
+import type { AuditEvent, PlatformRole } from "./domain";
+import { hashPassword } from "./security";
 import { scopeForPrincipal } from "./tenant-runtime";
+import { signAuditEvent } from "./db/audit-chain";
 import {
   assertRuntimeRoleIsSafe,
   inspectRuntimeRole,
@@ -13,7 +14,6 @@ import {
   type PoolClient,
 } from "./db/driver";
 import { newId } from "./db/ids";
-import { signAuditEvent } from "./db/audit-chain";
 import * as map from "./db/mapping";
 
 export type TenantAdminOrgUnit = {
@@ -75,23 +75,16 @@ function requireTenantAdmin(principal: Principal): void {
 
 async function read<T>(principal: Principal, run: (client: PoolClient) => Promise<T>): Promise<T> {
   requireTenantAdmin(principal);
-  const pool = await runtimePool();
-  return withTenantTransaction(pool, scopeForPrincipal(principal), run, { readOnly: true });
+  return withTenantTransaction(await runtimePool(), scopeForPrincipal(principal), run, { readOnly: true });
 }
 
 async function write<T>(principal: Principal, run: (client: PoolClient) => Promise<T>): Promise<T> {
   requireTenantAdmin(principal);
-  const pool = await runtimePool();
-  return withTenantTransaction(pool, scopeForPrincipal(principal), run);
+  return withTenantTransaction(await runtimePool(), scopeForPrincipal(principal), run);
 }
 
-function asRoles(value: unknown): PlatformRole[] {
-  return Array.isArray(value) ? value.map(String) as PlatformRole[] : [];
-}
-
-function asPaths(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String) : [];
-}
+const asRoles = (value: unknown): PlatformRole[] => Array.isArray(value) ? value.map(String) as PlatformRole[] : [];
+const asPaths = (value: unknown): string[] => Array.isArray(value) ? value.map(String) : [];
 
 async function appendTenantAudit(
   client: PoolClient,
@@ -105,8 +98,8 @@ async function appendTenantAudit(
   const scope = scopeForPrincipal(principal);
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`osa.audit:${scope.tenantId}`]);
   const { rows } = await client.query(
-    `SELECT a.id, a.tenant_id, a.actor_user_id, a.action, a.resource_type, a.resource_id, a.outcome,
-            a.occurred_at, a.request_id, a.metadata, a.previous_hash, a.event_hash
+    `SELECT a.id, a.tenant_id, a.actor_user_id, a.action, a.resource_type, a.resource_id,
+            a.outcome, a.occurred_at, a.request_id, a.metadata, a.previous_hash, a.event_hash
        FROM osa.audit_events a
       ORDER BY a.sequence DESC
       LIMIT 1`,
@@ -143,7 +136,8 @@ export async function listTenantOrgUnits(principal: Principal): Promise<TenantAd
       `SELECT ou.id::text, ou.parent_id::text, ou.code, ou.name, ou.path::text,
               count(u.id)::int AS member_count
          FROM osa.org_units ou
-         LEFT JOIN osa.users u ON u.tenant_id = ou.tenant_id AND u.org_unit_id = ou.id AND u.active
+         LEFT JOIN osa.users u
+           ON u.tenant_id = ou.tenant_id AND u.org_unit_id = ou.id AND u.active
         WHERE ou.path <@ ANY($1::ltree[])
         GROUP BY ou.id, ou.parent_id, ou.code, ou.name, ou.path
         ORDER BY nlevel(ou.path), ou.path`,
@@ -285,15 +279,7 @@ export async function setTenantUserActive(principal: Principal, userId: string, 
     );
     if (!result.rowCount) throw new Error("User not found in your delegated scope");
     if (!active) await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid", [userId]);
-    await appendTenantAudit(
-      client,
-      principal,
-      requestId,
-      active ? "tenant.user.activate" : "tenant.user.deactivate",
-      "user",
-      userId,
-      { active },
-    );
+    await appendTenantAudit(client, principal, requestId, active ? "tenant.user.activate" : "tenant.user.deactivate", "user", userId, { active });
   });
 }
 
@@ -304,7 +290,7 @@ export async function resetTenantUserPassword(
   requestId: string,
 ): Promise<{ userId: string; revokedSessions: number }> {
   requireTenantAdmin(principal);
-  await write(principal, async (client) => {
+  return write(principal, async (client) => {
     const scope = scopeForPrincipal(principal);
     const result = await client.query(
       `UPDATE osa.users u
@@ -318,25 +304,11 @@ export async function resetTenantUserPassword(
       [userId, hashPassword(password), scope.orgScopes],
     );
     if (!result.rowCount) throw new Error("User not found in your delegated scope");
-    const revoked = await client.query(
-      "DELETE FROM osa.sessions WHERE user_id = $1::uuid RETURNING id_hash",
-      [userId],
-    );
-    await appendTenantAudit(
-      client,
-      principal,
-      requestId,
-      "tenant.user.password.reset",
-      "user",
-      userId,
-      { revokedSessions: revoked.rowCount ?? 0 },
-    );
-    return { userId, revokedSessions: revoked.rowCount ?? 0 };
+    const revoked = await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid RETURNING id_hash", [userId]);
+    const revokedSessions = revoked.rowCount ?? 0;
+    await appendTenantAudit(client, principal, requestId, "tenant.user.password.reset", "user", userId, { revokedSessions });
+    return { userId, revokedSessions };
   });
-
-  // The transaction above is the authority. Return only non-secret metadata;
-  // the temporary password is intentionally held only by the caller/UI.
-  return { userId, revokedSessions: 0 };
 }
 
 export async function tenantAdminHealth(principal: Principal): Promise<{ users: number; organizations: number; tenantAdmins: number }> {
