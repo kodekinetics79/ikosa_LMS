@@ -53,7 +53,7 @@ export function ProductShell({ children, identity }: { children: ReactNode; iden
     <aside className={`sidebar ${open ? "sidebar--open" : ""}`} aria-label="Primary navigation">
       <div className="brand"><span className="brand-mark">iK</span><span><strong>Assure</strong><small>Operational Skills</small></span><button className="icon-button mobile-only" onClick={() => setOpen(false)} aria-label="Close navigation"><Icons.close /></button></div>
       <div className="workspace-switch"><span className="workspace-logo">{initials(identity.tenantName)}</span><span><small>Workspace</small><strong>{identity.tenantName}</strong></span><Icons.chevron /></div>
-      <nav>{visibleNav.map(item => { const active = item.href === "/" ? path === "/" : path.startsWith(item.href); const Icon = item.icon; return <Link key={item.href} href={item.href} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => setOpen(false)}><Icon /><span>{item.label}</span></Link>; })}</nav>
+      <nav>{visibleNav.map(item => { const active = path === item.href || path.startsWith(`${item.href}/`); const Icon = item.icon; return <Link key={item.href} href={item.href} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => setOpen(false)}><Icon /><span>{item.label}</span></Link>; })}</nav>
       <div className="sidebar-foot"><div className="trust-state"><Icons.shield /><span><strong>Trusted data</strong><small>All sources healthy</small></span><i /></div><div className="profile"><span className="avatar">{initials(identity.displayName)}</span><span><strong>{identity.displayName}</strong><small>{roleLabel}</small></span><SignOut /></div></div>
     </aside>
     <div className="workspace">
