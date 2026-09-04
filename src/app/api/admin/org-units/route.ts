@@ -1,7 +1,5 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
-import { requirePersistence } from "@/lib/server/persistence";
-import { scopeForPrincipal } from "@/lib/server/tenant-runtime";
 import { createTenantOrgUnit, listTenantOrgUnits } from "@/lib/server/tenant-admin-store";
 
 export const runtime = "nodejs";
@@ -9,19 +7,6 @@ export const dynamic = "force-dynamic";
 
 function requireTenantAdmin(roles: readonly string[]): void {
   if (!roles.includes("tenant_admin")) throw new AuthError(403, "Tenant administrator permission required");
-}
-
-async function audit(principal: Awaited<ReturnType<typeof principalFromRequest>>, rid: string, orgId: string, metadata: Record<string, string | number | boolean | null>) {
-  const persistence = await requirePersistence();
-  await persistence.write(scopeForPrincipal(principal), (repo) => repo.appendAudit({
-    actorUserId: principal.user.id,
-    action: "tenant.organization.create",
-    resourceType: "org_unit",
-    resourceId: orgId,
-    outcome: "success",
-    requestId: rid,
-    metadata,
-  }));
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -49,8 +34,8 @@ export async function POST(request: Request): Promise<Response> {
         parentId: requiredString(body, "parentId", 100),
         code,
         name: requiredString(body, "name", 160),
+        requestId: rid,
       });
-      await audit(principal, rid, created.id, { code: created.code, parentId: created.parentId ?? "" });
       return json(created, { status: 201 });
     } catch (error) {
       if ((error as { code?: string }).code === "23505") throw new ValidationError("Validation failed", { code: "This organization code already exists" });
