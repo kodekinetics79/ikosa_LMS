@@ -6,8 +6,10 @@ import {
   platformPrincipalFromToken,
   PLATFORM_SESSION_COOKIE,
   type CreateTenantInput,
+  type TenantState,
 } from "@/lib/server/platform-admin";
 import { listManagedTenants } from "@/lib/server/platform-admin-portfolio";
+import { setManagedTenantState } from "@/lib/server/platform-admin-lifecycle";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,5 +47,21 @@ export async function POST(request: Request): Promise<Response> {
   } catch (error) {
     const status = error instanceof PlatformAdminError ? error.status : 500;
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to create tenant" }, { status });
+  }
+}
+
+export async function PATCH(request: Request): Promise<Response> {
+  try {
+    const actor = await principal(request);
+    assertPlatformCsrf(request, actor);
+    const body = await request.json() as { tenantId?: string; state?: TenantState };
+    if (!body.tenantId || !body.state || !(["trial", "active", "suspended"] as const).includes(body.state)) {
+      return NextResponse.json({ error: "Tenant and valid target state are required" }, { status: 400 });
+    }
+    const result = await setManagedTenantState(actor, body.tenantId, body.state);
+    return NextResponse.json(result);
+  } catch (error) {
+    const status = error instanceof PlatformAdminError ? error.status : 500;
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to change tenant state" }, { status });
   }
 }
