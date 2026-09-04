@@ -8,6 +8,7 @@ export function LoginForm() {
   const search = useSearchParams();
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const initialTenant = (search.get("tenant") ?? "").trim().toLowerCase();
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -18,12 +19,18 @@ export function LoginForm() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // No tenant slug: the server resolves the tenant from the identity.
-        // Pinning it here made every workspace but one unreachable from the UI.
-        body: JSON.stringify({ email: data.get("email"), password: data.get("password") }),
+        // PostgreSQL authentication is tenant-first by design. The workspace
+        // slug identifies the tenant directory row before the user table is
+        // touched, so login never needs a cross-tenant email search or an RLS
+        // bypass. Platform-admin handoff gives every customer this slug.
+        body: JSON.stringify({
+          tenantSlug: data.get("tenantSlug"),
+          email: data.get("email"),
+          password: data.get("password"),
+        }),
       });
       if (!response.ok) {
-        setError("Unable to sign in. Check your credentials and try again.");
+        setError("Unable to sign in. Check your workspace and credentials, then try again.");
         return;
       }
       // Return the person to wherever the proxy interrupted them, but only to a
@@ -44,8 +51,11 @@ export function LoginForm() {
       <div className="mobile-login-brand"><span className="brand-mark">iK</span><strong>Assure</strong></div>
       <p className="eyebrow">Welcome back</p>
       <h2>Sign in to your workspace</h2>
-      <p>Use your organization account to continue.</p>
+      <p>Use the workspace ID provided by your organization administrator.</p>
       {error && <div className="login-error" role="alert">{error}</div>}
+      <label>Workspace
+        <input type="text" name="tenantSlug" autoComplete="organization" defaultValue={initialTenant} placeholder="your-organization" pattern="[a-z0-9][a-z0-9-]{1,62}" required />
+      </label>
       <label>Work email
         <input type="email" name="email" autoComplete="email" required />
       </label>
