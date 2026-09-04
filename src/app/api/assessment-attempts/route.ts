@@ -1,5 +1,6 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
-import { gradeAssessmentResponse, saveAssessmentResponse, startAssessmentAttempt, submitAssessmentAttempt } from "@/lib/server/assessment-store";
+import { gradeAssessmentResponse, startAssessmentAttempt, submitAssessmentAttempt } from "@/lib/server/assessment-store";
+import { saveTimedAssessmentResponse } from "@/lib/server/assessment-attempt-write-store";
 import { json, objectBody, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
 export const runtime = "nodejs";
@@ -34,7 +35,7 @@ export async function PATCH(request: Request): Promise<Response> {
 
     if (action === "save_response") {
       requireLearner(principal.roles);
-      await saveAssessmentResponse(
+      await saveTimedAssessmentResponse(
         principal,
         requiredString(body, "attemptId", 100),
         requiredString(body, "questionId", 100),
