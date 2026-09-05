@@ -272,6 +272,14 @@ export function AssessmentWorkspaceClient({
           <div className={styles.cardStats}><span><strong>{assessment.itemCount}</strong> questions</span><span><strong>{assessment.durationMinutes ?? "—"}</strong> {assessment.durationMinutes ? "min" : "untimed"}</span><span><strong>{assessment.passPercentage}%</strong> pass</span></div>
           <div className={styles.cardFooter}>
             <small>{assessment.attemptCount} attempt{assessment.attemptCount === 1 ? "" : "s"}{assessment.pendingMarking ? ` · ${assessment.pendingMarking} pending marking` : ""}</small>
+            {/* The builder is where an assessment is actually assembled: order,
+                point values, required flags, availability and the publish
+                checklist. Publishing straight from the card is kept for a
+                draft that is already complete, but it is no longer the only
+                way in — before the builder existed, attaching a question was
+                fire-and-forget and nothing could show what was on an
+                assessment at all. */}
+            {capabilities.author ? <Link className={styles.ghostButton} href={`/assessments/${assessment.id}`}>Open builder</Link> : null}
             {capabilities.author && assessment.status === "draft" ? <button className={styles.primarySmall} disabled={busy === `publish:${assessment.id}`} onClick={() => publish(assessment)}>{busy === `publish:${assessment.id}` ? "Publishing…" : "Publish"}</button> : null}
             {capabilities.learner && assessment.status === "published" ? <Link className={styles.primarySmall} href={`/assessments/${assessment.id}/attempt`}>{assessment.attemptCount ? "Continue / retry" : "Start"}</Link> : null}
           </div>
