@@ -75,7 +75,69 @@ function migrate(parsed: Record<string, unknown>): Database {
   return parsed as unknown as Database;
 }
 
+/**
+ * True when PostgreSQL is the system of record. Read lazily from the
+ * environment rather than cached, so a test can unset it.
+ */
+function usePostgres(): boolean {
+  return Boolean(process.env.DATABASE_URL);
+}
+
+/**
+ * Loads the current tenant's rows from PostgreSQL in the `Database` shape the
+ * application already reads.
+ *
+ * Returns an EMPTY database when no validated identity has been established for
+ * this request. That is the correct answer, not a degraded one: with no
+ * session there is no tenant, and RLS would return nothing anyway. Callers that
+ * genuinely predate authentication - resolving a session cookie, looking a
+ * tenant up by slug - go through the repository in auth.ts, never through here.
+ */
+async function readFromPostgres(): Promise<Database> {
+  const { currentActor } = await import("./request-context");
+  let actor = currentActor();
+
+  if (!actor) {
+    // AsyncLocalStorage.enterWith() binds the current execution context, but a
+    // Server Component's continuation after `await principalFromCookies()` does
+    // not inherit it, and each component renders in its own context anyway - so
+    // the actor recorded during authentication is frequently gone by the time a
+    // page reaches here. Losing it silently returned an EMPTY database, which
+    // rendered every screen as a truthful-looking "nothing in scope".
+    //
+    // Resolve it from the session cookie instead. One indexed lookup, and it
+    // cannot be lost between components.
+    try {
+      const { cookies } = await import("next/headers");
+      const { SESSION_COOKIE } = await import("./session-cookie");
+      const token = (await cookies()).get(SESSION_COOKIE)?.value ?? null;
+      if (token) {
+        const { requirePersistence } = await import("./persistence");
+        const gateway = await requirePersistence();
+        const session = await gateway.resolveSession(token);
+        if (session) actor = { tenantId: session.tenantId, userId: session.userId };
+      }
+    } catch {
+      // No request scope (a script, a background job). Falls through to empty.
+    }
+  }
+
+  if (!actor) return migrate({ schemaVersion: SCHEMA_VERSION });
+
+  const { requirePersistence } = await import("./persistence");
+  const gateway = await requirePersistence();
+  // The scope restricts nothing beyond the tenant here: the snapshot returns the
+  // tenant's rows and the application applies delegated-org and self-scope
+  // filtering exactly as it always has. The tenant boundary itself is enforced
+  // by RLS inside the transaction, not by these values.
+  return gateway.read(
+    { tenantId: actor.tenantId, userId: actor.userId, orgScopes: [], viewerOrgPath: "", selfOnly: false },
+    (repo) => repo.loadSnapshot(),
+  );
+}
+
 export async function readDatabase(): Promise<Database> {
+  if (usePostgres()) return readFromPostgres();
   await writeQueue;
   await ensureDatabase();
   const raw = await readFile(dataFile, "utf8");

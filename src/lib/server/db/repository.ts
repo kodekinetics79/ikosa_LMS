@@ -181,6 +181,15 @@ export interface OsaRepository {
   listEnrollmentsWithProgress(): Promise<EnrollmentWithProgress[]>;
   listSignalsInScope(): Promise<Signal[]>;
   listOpenNotifications(): Promise<Notification[]>;
+  /**
+   * The current tenant's rows in the shape the application already reads.
+   *
+   * A transitional read used by `store.ts::readDatabase` so pages and routes
+   * could keep their existing filtering while the datastore changed underneath
+   * them. Prefer the scoped queries above for anything on a hot path.
+   */
+  loadSnapshot(): Promise<import("../domain").Database>;
+
   /** One aggregate query, not five in-memory passes over the whole database. */
   readinessSummary(): Promise<ReadinessSummary>;
   listAuditEvents(limit: number): Promise<AuditEvent[]>;

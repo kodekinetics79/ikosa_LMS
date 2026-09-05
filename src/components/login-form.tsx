@@ -18,9 +18,15 @@ export function LoginForm() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // No tenant slug: the server resolves the tenant from the identity.
-        // Pinning it here made every workspace but one unreachable from the UI.
-        body: JSON.stringify({ email: data.get("email"), password: data.get("password") }),
+        // Workspace is optional. Left blank the server falls back to the
+        // deployment's home workspace; supplied, it selects any other. Pinning
+        // a single slug here previously made every workspace but one
+        // unreachable from the UI.
+        body: JSON.stringify({
+          email: data.get("email"),
+          password: data.get("password"),
+          tenantSlug: (data.get("tenantSlug") as string | null)?.trim() || undefined,
+        }),
       });
       if (!response.ok) {
         setError("Unable to sign in. Check your credentials and try again.");
@@ -51,6 +57,9 @@ export function LoginForm() {
       </label>
       <label><span>Password <a href="#">Forgot password?</a></span>
         <input type="password" name="password" autoComplete="current-password" required />
+      </label>
+      <label>Workspace <span className="muted">(optional)</span>
+        <input type="text" name="tenantSlug" autoComplete="organization" placeholder="Leave blank for your default workspace" />
       </label>
       <button className="button primary full" type="submit" disabled={pending}>{pending ? "Signing in…" : "Sign in securely"}</button>
       <div className="or"><span>or</span></div>
