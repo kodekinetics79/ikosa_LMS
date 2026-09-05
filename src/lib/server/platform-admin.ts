@@ -4,6 +4,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { Pool, type PoolClient } from "pg";
 import { hashPassword, verifyPassword } from "./security";
+import { secureAttribute } from "./session-cookie";
 
 export const PLATFORM_SESSION_COOKIE = "ik_platform_session";
 const PLATFORM_SESSION_HOURS = 8;
@@ -230,9 +231,10 @@ export function assertPlatformCsrf(request: Request, principal: PlatformPrincipa
   if (!presented || left.length !== right.length || !timingSafeEqual(left, right)) throw new PlatformAdminError(403, "Invalid platform CSRF token");
 }
 
-export function serializePlatformCookie(sessionToken: string): string {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  return `${PLATFORM_SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${PLATFORM_SESSION_HOURS * 3600}${secure}`;
+export function serializePlatformCookie(sessionToken: string, request: Request): string {
+  // Same rule as the tenant session cookie: `Secure` unless the connection is
+  // demonstrably a trustworthy origin. See session-cookie.ts::cookieIsSecure.
+  return `${PLATFORM_SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${PLATFORM_SESSION_HOURS * 3600}${secureAttribute(request)}`;
 }
 
 export function clearPlatformCookie(): string {

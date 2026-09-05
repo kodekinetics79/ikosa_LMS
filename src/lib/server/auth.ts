@@ -11,7 +11,7 @@ import { toStorageId } from "./db/ids";
 import type { ActorScope, OsaPersistence, SessionRef } from "./db/repository";
 
 export { SESSION_COOKIE } from "./session-cookie";
-import { SESSION_COOKIE } from "./session-cookie";
+import { SESSION_COOKIE, secureAttribute } from "./session-cookie";
 const SESSION_HOURS = 12;
 const MAX_SESSIONS_PER_USER = 5;
 
@@ -543,9 +543,8 @@ export function assertCsrf(request: Request, principal: Principal): void {
   if (!presented || !tokensMatch(presented, principal.session.csrfToken)) throw new AuthError(403, "Invalid CSRF token");
 }
 
-export function serializeSessionCookie(session: Session): string {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(session.id)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secure}`;
+export function serializeSessionCookie(session: Session, request: Request): string {
+  return `${SESSION_COOKIE}=${encodeURIComponent(session.id)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}${secureAttribute(request)}`;
 }
 
 export function clearSessionCookie(): string {

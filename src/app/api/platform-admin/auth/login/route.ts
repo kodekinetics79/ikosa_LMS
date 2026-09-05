@@ -16,7 +16,7 @@ export async function POST(request: Request): Promise<Response> {
       operator: principal.operator,
       csrfToken: principal.csrfToken,
     });
-    response.headers.set("set-cookie", serializePlatformCookie(principal.sessionToken));
+    response.headers.set("set-cookie", serializePlatformCookie(principal.sessionToken, request));
     return response;
   } catch (error) {
     const status = error instanceof PlatformAdminError ? error.status : 500;

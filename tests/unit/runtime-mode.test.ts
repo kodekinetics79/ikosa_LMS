@@ -81,3 +81,45 @@ test("plain `next dev` is not treated as a requested fixture mode", () => {
   // trip the deployment guard.
   assert.doesNotThrow(() => assertFixtureModeIsPermitted({ NODE_ENV: "development", DATABASE_URL: "postgresql://u:p@127.0.0.1/d" }));
 });
+
+/* -------------------------------------------------------------------------
+ * Session cookie transport security.
+ *
+ * `Secure` used to be decided by `NODE_ENV === "production"`, which is the
+ * wrong question in both directions: Next.js forces NODE_ENV=production inside
+ * the standalone bundle (so a local production build over http emitted a
+ * cookie the browser silently discarded, which is why the browser suite had
+ * never run against one), and a deployment reporting anything else would have
+ * shipped session cookies without `Secure` over the public internet.
+ * ---------------------------------------------------------------------- */
+
+import { cookieIsSecure } from "../../src/lib/server/session-cookie";
+
+const get = (url: string, headers: Record<string, string> = {}) => new Request(url, { headers });
+
+test("a plain-http request to a real host still gets a Secure cookie", () => {
+  // The important direction: an unrecognised deployment shape must fail towards
+  // a cookie that refuses to travel in clear text.
+  assert.equal(cookieIsSecure(get("http://app.example.com/api/auth/login")), true);
+  assert.equal(cookieIsSecure(get("http://10.0.0.5/api/auth/login")), true);
+});
+
+test("https is secure however it is reported", () => {
+  assert.equal(cookieIsSecure(get("https://app.example.com/api/auth/login")), true);
+  assert.equal(cookieIsSecure(get("http://app.example.com/api/auth/login", { "x-forwarded-proto": "https" })), true);
+  // A proxy chain reports a list; the first entry is the client's scheme.
+  assert.equal(cookieIsSecure(get("http://app.example.com/api/auth/login", { "x-forwarded-proto": "https, http" })), true);
+});
+
+test("a proxy that reports plain http is believed, and is not secure", () => {
+  assert.equal(cookieIsSecure(get("https://internal/api/auth/login", { "x-forwarded-proto": "http" })), false);
+});
+
+test("loopback is a trustworthy origin", () => {
+  // There is no network to intercept, and a real deployment is never loopback
+  // from the client's point of view. This is what lets the browser suite run
+  // against a production bundle.
+  for (const url of ["http://127.0.0.1:3000/api/auth/login", "http://localhost:3000/api/auth/login", "http://[::1]:3000/api/auth/login"]) {
+    assert.equal(cookieIsSecure(get(url)), false, url);
+  }
+});
