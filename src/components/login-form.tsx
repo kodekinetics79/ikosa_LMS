@@ -51,7 +51,7 @@ export function LoginForm() {
       <p>Use the workspace ID provided by your organization administrator.</p>
       {error && <div className="login-error" role="alert">{error}</div>}
       <label>Workspace
-        <input type="text" name="tenantSlug" autoComplete="organization" defaultValue={initialTenant} placeholder="your-organization" pattern="[a-z0-9][a-z0-9-]{1,62}" required />
+        <input type="text" name="tenantSlug" autoComplete="organization" defaultValue={initialTenant} placeholder="your-organization" pattern="[a-z0-9][a-z0-9\-]{1,62}" required />
       </label>
       <label>Work email
         <input type="email" name="email" autoComplete="email" required />
