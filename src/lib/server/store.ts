@@ -93,7 +93,8 @@ function usePostgres(): boolean {
  * genuinely predate authentication - resolving a session cookie, looking a
  * tenant up by slug - go through the repository in auth.ts, never through here.
  */
-async function readFromPostgres(): Promise<Database> {
+/** The validated identity for this request, from the async context or the cookie. */
+async function resolveActor(): Promise<{ tenantId: string; userId: string } | undefined> {
   const { currentActor } = await import("./request-context");
   let actor = currentActor();
 
@@ -122,6 +123,11 @@ async function readFromPostgres(): Promise<Database> {
     }
   }
 
+  return actor;
+}
+
+async function readFromPostgres(): Promise<Database> {
+  const actor = await resolveActor();
   if (!actor) return migrate({ schemaVersion: SCHEMA_VERSION });
 
   const { requirePersistence } = await import("./persistence");
@@ -144,7 +150,43 @@ export async function readDatabase(): Promise<Database> {
   return migrate(JSON.parse(raw) as Record<string, unknown>);
 }
 
+/**
+ * Applies a mutation against PostgreSQL.
+ *
+ * Loads the tenant's snapshot, runs the caller's mutation over it, and writes
+ * back only what changed - all inside one transaction holding a
+ * transaction-scoped advisory lock on the tenant. The lock is what makes a
+ * read-modify-write safe here: it serialises writers the way the old
+ * single-process write queue did, but across instances, which a file store
+ * behind a per-process queue could never do.
+ */
+async function mutateInPostgres<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {
+  const actor = await resolveActor();
+  if (!actor) throw new Error("A validated session is required before writing.");
+
+  const { requirePersistence } = await import("./persistence");
+  const { loadTenantSnapshot } = await import("./db/snapshot");
+  const { persistSnapshotChanges } = await import("./db/persist-snapshot");
+  const gateway = await requirePersistence();
+
+  return gateway.write(
+    { tenantId: actor.tenantId, userId: actor.userId, orgScopes: [], viewerOrgPath: "", selfOnly: false },
+    async (repo) => {
+      const db = (repo as unknown as { db: import("./db/driver").Queryable }).db;
+      // Serialise writers for this tenant. Released at COMMIT or ROLLBACK.
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [actor.tenantId]);
+
+      const before = await loadTenantSnapshot(db);
+      const after = await loadTenantSnapshot(db);
+      const result = await mutation(after);
+      await persistSnapshotChanges(db, repo, before, after, actor.userId);
+      return result;
+    },
+  );
+}
+
 export function mutateDatabase<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {
+  if (usePostgres()) return mutateInPostgres(mutation);
   const operation = writeQueue.then(async () => {
     await ensureDatabase();
     const database = migrate(JSON.parse(await readFile(dataFile, "utf8")) as Record<string, unknown>);
