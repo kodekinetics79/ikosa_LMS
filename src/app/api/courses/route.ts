@@ -51,6 +51,15 @@ export async function POST(request: Request): Promise<Response> {
     if (!Number.isFinite(passingScore) || passingScore < 0 || passingScore > 1) {
       throw new ValidationError("Validation failed", { passingScore: "Passing score must be between 0 and 1" });
     }
+    if (evidenceRule === "attendance_only" && passingScore !== 0) {
+      // The schema enforces this (`courses_check1`), so without the check here
+      // the request reached the write and came back as an opaque 500. The rule
+      // is real: an attendance-only course records that somebody turned up, and
+      // a pass mark on a thing nobody is marked on is a number with no meaning.
+      throw new ValidationError("Validation failed", {
+        passingScore: "An attendance-only course has no passing score. Set it to 0, or make this course assessed.",
+      });
+    }
     const validityMonths = body.validityMonths === null || body.validityMonths === undefined ? null : Number(body.validityMonths);
     if (validityMonths !== null && (!Number.isInteger(validityMonths) || validityMonths <= 0)) {
       throw new ValidationError("Validation failed", { validityMonths: "Validity must be a positive whole number of months" });
