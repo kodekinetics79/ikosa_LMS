@@ -463,7 +463,7 @@ export function sweepNotifications(
       Object.assign(open, candidate);
       refreshed += 1;
     } else {
-      notifications.push({ id: newId("ntf"), ...candidate, createdAt: timestamp, readAt: null, resolvedAt: null });
+      notifications.push({ id: newId(), ...candidate, createdAt: timestamp, readAt: null, resolvedAt: null });
       raised += 1;
     }
   }

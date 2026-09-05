@@ -32,7 +32,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!org) throw new Error("Organizational unit not found");
     authorize(principal, "intervention:create", { tenantId: principal.tenantId, orgUnit: org, subjectUserId: gap.subjectUserId });
     const intervention: Intervention = {
-      id: newId("int"), tenantId: principal.tenantId, orgUnitId: gap.orgUnitId, gapCaseId,
+      id: newId(), tenantId: principal.tenantId, orgUnitId: gap.orgUnitId, gapCaseId,
       type: optionalEnum(body, "type", ["learning", "coaching", "job_aid", "process", "tooling", "staffing"] as const, "learning"),
       title: requiredString(body, "title", 180), ownerUserId: principal.user.id,
       dueDate: requiredString(body, "dueDate", 10), status: "planned",

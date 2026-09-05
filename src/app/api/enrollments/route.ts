@@ -72,7 +72,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const enrollment: Enrollment = {
-      id: newId("enr"),
+      id: newId(),
       tenantId: principal.tenantId,
       orgUnitId: subject.orgUnitId,
       courseId,

@@ -31,7 +31,7 @@ export async function POST(request: Request): Promise<Response> {
     authorize(principal, "tna:create", { tenantId: principal.tenantId, orgUnit: org });
     const targetRoleIds = Array.isArray(body.targetRoleIds) ? body.targetRoleIds.filter((value): value is string => typeof value === "string") : [];
     if (!targetRoleIds.length || targetRoleIds.some((roleId) => !db.jobRoles.some((role) => role.id === roleId && role.tenantId === principal.tenantId))) throw new ValidationError("Validation failed", { targetRoleIds: "At least one valid tenant role is required" });
-    const study: TnaStudy = { id: newId("tna"), tenantId: principal.tenantId, orgUnitId, title: requiredString(body, "title", 160), objective: requiredString(body, "objective", 1000), status: "draft", ownerUserId: principal.user.id, targetRoleIds, dueDate: requiredString(body, "dueDate", 10), createdAt: new Date().toISOString() };
+    const study: TnaStudy = { id: newId(), tenantId: principal.tenantId, orgUnitId, title: requiredString(body, "title", 160), objective: requiredString(body, "objective", 1000), status: "draft", ownerUserId: principal.user.id, targetRoleIds, dueDate: requiredString(body, "dueDate", 10), createdAt: new Date().toISOString() };
     assertScoped(db, principal, "tna:create", study);
     await mutateDatabase((state) => state.tnaStudies.push(study));
     await appendAudit({ tenantId: principal.tenantId, actorUserId: principal.user.id, action: "tna.create", resourceType: "tna_study", resourceId: study.id, outcome: "success", requestId: rid, metadata: { status: study.status } });

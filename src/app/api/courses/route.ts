@@ -57,7 +57,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const course: Course = {
-      id: newId("crs"),
+      id: newId(),
       tenantId: principal.tenantId,
       orgUnitId,
       code: requiredString(body, "code", 40),

@@ -71,7 +71,7 @@ export function recordModuleCompletion(
     existing.score = score;
   } else {
     const completion: ModuleCompletion = {
-      id: newId("mcp"),
+      id: newId(),
       tenantId: enrollment.tenantId,
       enrollmentId: enrollment.id,
       moduleId,
@@ -132,7 +132,7 @@ export function recordModuleCompletion(
   enrollment.completedAt = now.toISOString();
 
   const evidence: Evidence = {
-    id: newId("ev"),
+    id: newId(),
     tenantId: enrollment.tenantId,
     orgUnitId: enrollment.orgUnitId,
     subjectUserId: enrollment.subjectUserId,
