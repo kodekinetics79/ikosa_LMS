@@ -181,14 +181,20 @@ export async function submitAssessmentAttemptSafely(
     const pct = percentage(earned, max);
     const fullyGraded = !manualRequired;
     const { rows: updated } = await client.query(
+      // Every parameter is cast explicitly. Inside a CASE with a NULL branch
+      // PostgreSQL cannot infer a parameter's type from the target column, so
+      // an uncast $6 arrived as `unknown` and resolved to text — every submit of
+      // an all-objective assessment failed with
+      // `column "percentage" is of type numeric but expression is of type text`.
+      // The path that worked was the one where the CASE was never taken.
       `UPDATE osa.assessment_attempts
           SET status=$2,
               submitted_at=now(),
-              graded_at=CASE WHEN $3 THEN now() ELSE NULL END,
-              score_points=$4,
-              max_points=$5,
-              percentage=CASE WHEN $3 THEN $6 ELSE NULL END,
-              passed=CASE WHEN $3 THEN $6 >= $7 ELSE NULL END
+              graded_at=CASE WHEN $3::boolean THEN now() ELSE NULL END,
+              score_points=$4::numeric,
+              max_points=$5::numeric,
+              percentage=CASE WHEN $3::boolean THEN $6::numeric ELSE NULL END,
+              passed=CASE WHEN $3::boolean THEN $6::numeric >= $7::numeric ELSE NULL END
         WHERE id=$1::uuid
         RETURNING *`,
       [attemptId, fullyGraded ? "graded" : "submitted", fullyGraded, earned, max, pct, num(attemptRow.pass_percentage)],
