@@ -117,7 +117,13 @@ test.describe.serial('Assessment engine', () => {
     await objectiveDialog.getByLabel(/question type/i).selectOption('single_choice');
     await objectiveDialog.getByLabel(/^prompt$/i).fill(OBJECTIVE_PROMPT);
     await objectiveDialog.getByLabel(/^options/i).fill('RBAC\nShared passwords\nPublic access');
-    await objectiveDialog.getByLabel(/^correct answer/i).fill('1');
+    // The correct answer is MARKED, not typed. It used to be a free-text box the
+    // author put an option number into, and an index outside the list was
+    // silently dropped — producing a question no learner could ever get right.
+    // Each option line now appears here as a radio, so the id the answer key
+    // stores is the id of an option that demonstrably exists.
+    await objectiveDialog.getByRole('radio').first().check();
+    await expect(objectiveDialog.getByRole('radio').first()).toBeChecked();
     await objectiveDialog.getByLabel(/^points$/i).fill(String(OBJECTIVE_POINTS));
     await objectiveDialog.getByLabel(/^difficulty/i).selectOption('2');
     await objectiveDialog.getByLabel(/bloom level/i).selectOption('understand');
@@ -131,8 +137,9 @@ test.describe.serial('Assessment engine', () => {
     const essayDialog = page.getByRole('dialog');
     await essayDialog.getByLabel(/question bank/i).selectOption({ label: BANK_NAME });
     await essayDialog.getByLabel(/question type/i).selectOption('long_text');
-    // A long-text question has no key to enter, and the studio must stop asking
+    // A long-text question has no key to mark, and the studio must stop asking
     // for one: an essay with an "answer" would be autoscored against a string.
+    await expect(essayDialog.getByRole('radio')).toHaveCount(0);
     await expect(essayDialog.getByLabel(/^correct answer/i)).toHaveCount(0);
     await essayDialog.getByLabel(/^prompt$/i).fill(ESSAY_PROMPT);
     await essayDialog.getByLabel(/^points$/i).fill(String(ESSAY_POINTS));
@@ -231,8 +238,17 @@ test.describe.serial('Assessment engine', () => {
     const card = page.locator('article').filter({ hasText: EXAM_CODE });
     await expect(card.getByRole('heading', { name: EXAM_TITLE })).toBeVisible();
 
-    const starting = page.waitForResponse(attemptsCall('POST'));
     await card.getByRole('link', { name: /start|continue/i }).click();
+
+    // Opening the URL does NOT consume an attempt. It used to POST on mount, so
+    // clicking the wrong card spent one of a learner's limited attempts with no
+    // warning and no way back. The player now states the time limit, the pass
+    // mark and how many attempts are left, and starts only when the learner
+    // says so — which is the click below.
+    await expect(page.getByRole('heading', { name: EXAM_TITLE })).toBeVisible();
+    await expect(page.getByText(new RegExp(String(PASS_PERCENTAGE)))).toBeVisible();
+    const starting = page.waitForResponse(attemptsCall('POST'));
+    await page.getByRole('button', { name: /start assessment|resume attempt/i }).click();
     const startResponse = await starting;
     expect(startResponse.status(), await startResponse.text()).toBe(201);
     const workspace = await startResponse.json();
@@ -450,8 +466,12 @@ test.describe.serial('Assessment engine', () => {
     await page.goto('/assessments');
 
     const card = page.locator('article').filter({ hasText: EXAM_CODE });
-    const starting = page.waitForResponse(attemptsCall('POST'));
     await card.getByRole('link', { name: /start|continue/i }).click();
+    // The player asks before it spends an attempt, so the start is a click and
+    // not a page load. This learner has already used their attempt in the
+    // journey above, so the button resumes it rather than starting a new one.
+    const starting = page.waitForResponse(attemptsCall('POST'));
+    await page.getByRole('button', { name: /start assessment|resume attempt/i }).click();
     const startResponse = await starting;
     expect(startResponse.status(), await startResponse.text()).toBe(201);
 
