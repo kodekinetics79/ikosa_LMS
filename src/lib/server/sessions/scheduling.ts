@@ -30,6 +30,7 @@ import { toStorageId } from "../db/ids";
 import {
   appendAssessmentAudit, iso, isoOrNull, num, numOrNull, readTx, scopePaths, writeTx,
 } from "../assessment/runtime";
+import { recordAttendanceCourseProgress } from "./attendance-completion";
 
 export const SESSION_STATUSES = ["scheduled", "live", "completed", "cancelled"] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
@@ -719,6 +720,11 @@ export type AttendanceResult = {
   /** How many minute values were reduced to the session's scheduled length. */
   capped: number;
   cappedAtMinutes: number;
+  /** Course modules this register completed, when the session delivers one. */
+  courseModuleCompletions: number;
+  /** Enrollments the register finished outright. Never carries evidence — see
+   *  sessions/attendance-completion.ts. */
+  coursesCompleted: number;
 };
 
 /**
@@ -791,6 +797,28 @@ export async function recordAttendance(
       attended: statuses.filter((status) => status === "attended").length,
       absent: statuses.filter((status) => status === "absent").length,
     });
-    return { sessionId: id, recorded: entries.length, capped, cappedAtMinutes: cap };
+
+    // A register that satisfies a course module must satisfy it in the SAME
+    // transaction that wrote the register, or a crash between them leaves a
+    // signed attendance that no course ever heard about. Only `attended`
+    // counts: partial attendance is not attendance, and an excusal is a reason
+    // not to hold someone to a requirement rather than a claim they met it.
+    const attendedUserIds = subjectIds.filter((_, index) => statuses[index] === "attended");
+    const progressed = await recordAttendanceCourseProgress(client, principal, {
+      sessionId: id,
+      moduleId: session.module_id ? String(session.module_id) : null,
+      courseId: session.course_id ? String(session.course_id) : null,
+      attendedUserIds,
+      requestId,
+    });
+
+    return {
+      sessionId: id,
+      recorded: entries.length,
+      capped,
+      cappedAtMinutes: cap,
+      courseModuleCompletions: progressed.length,
+      coursesCompleted: progressed.filter((outcome) => outcome.enrollmentStatus === "completed").length,
+    };
   });
 }

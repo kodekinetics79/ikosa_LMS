@@ -922,6 +922,151 @@ describe('assessment engine', () => {
     assert.ok([403, 404].includes(foreignRoster.response.status), 'another tenant cannot open the roster');
   });
 
+  test('a recorded attendance completes an attendance-only course and emits no competence evidence', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const suffix = `AT${Date.now().toString(36).toUpperCase()}`;
+    const admin = world.admin;
+    const learner = world.learner;
+
+    const course = await call('/api/courses', {
+      session: admin, method: 'POST',
+      body: {
+        orgUnitId: admin.user.orgUnitId, code: `SESS-${suffix}`, title: `Storm briefing ${suffix}`,
+        description: 'Attendance is the whole requirement', skillId: world.bootstrap.skills[0].id,
+        targetLevel: 4, evidenceRule: 'attendance_only', passingScore: 0, validityMonths: null, status: 'draft'
+      }
+    });
+    assert.equal(course.response.status, 201, JSON.stringify(course.body));
+
+    const module = await call('/api/course-modules', {
+      session: admin, method: 'POST',
+      body: { courseId: course.body.id, title: 'Attend the briefing', kind: 'lesson', durationMinutes: 60, required: true }
+    });
+    assert.equal(module.response.status, 201, JSON.stringify(module.body));
+    const published = await call('/api/course-modules', { session: admin, method: 'PATCH', body: { action: 'publish', courseId: course.body.id } });
+    assert.equal(published.response.status, 200, JSON.stringify(published.body));
+
+    const enrollment = await call('/api/enrollments', {
+      session: admin, method: 'POST', body: { courseId: course.body.id, subjectUserId: learner.user.id, source: 'assigned' }
+    });
+    assert.equal(enrollment.response.status, 201, JSON.stringify(enrollment.body));
+
+    const starts = new Date(Date.now() - 7_200_000).toISOString();
+    const ends = new Date(Date.now() - 3_600_000).toISOString();
+    const session = await call('/api/live-sessions', {
+      session: admin, method: 'POST',
+      body: {
+        orgUnitId: admin.user.orgUnitId, title: `Storm briefing ${suffix}`, description: 'Pre-season briefing',
+        startsAt: starts, endsAt: ends, timeZone: 'America/New_York',
+        courseId: course.body.id, moduleId: module.body.id
+      }
+    });
+    assert.equal(session.response.status, 201, JSON.stringify(session.body));
+
+    await call('/api/session-attendance', { session: admin, method: 'POST', body: { action: 'register', sessionId: session.body.id, userIds: [learner.user.id] } });
+
+    // An ABSENCE completes nothing. Partial attendance is not attendance, and
+    // an excusal is a reason not to hold someone to a requirement rather than a
+    // claim they met it.
+    const absent = await call('/api/session-attendance', {
+      session: admin, method: 'PATCH',
+      body: { action: 'record', sessionId: session.body.id, entries: [{ subjectUserId: learner.user.id, status: 'absent', minutesAttended: 0 }] }
+    });
+    assert.equal(absent.response.status, 200, JSON.stringify(absent.body));
+    assert.equal(absent.body.courseModuleCompletions, 0, 'an absence completes nothing');
+    const afterAbsence = await call('/api/enrollments', { session: learner });
+    assert.notEqual(afterAbsence.body.items.find((item) => item.id === enrollment.body.id).status, 'completed');
+
+    // Attending it does complete the course.
+    const attended = await call('/api/session-attendance', {
+      session: admin, method: 'PATCH',
+      body: { action: 'record', sessionId: session.body.id, entries: [{ subjectUserId: learner.user.id, status: 'attended', minutesAttended: 60, note: 'Present throughout' }] }
+    });
+    assert.equal(attended.response.status, 200, JSON.stringify(attended.body));
+    assert.equal(attended.body.courseModuleCompletions, 1);
+    assert.equal(attended.body.coursesCompleted, 1);
+
+    const completed = (await call('/api/enrollments', { session: learner })).body.items.find((item) => item.id === enrollment.body.id);
+    assert.equal(completed.status, 'completed', 'the register completed the course');
+    // THE RULE THAT MUST NEVER BEND. Recording that somebody attended is not a
+    // claim that they can do the work, so the course completes and no
+    // competence evidence exists.
+    assert.equal(completed.evidenceId ?? null, null, 'attendance emits no competence evidence');
+    assert.equal(completed.score, null);
+
+    // And the bridge is in the ledger, so "why did this course complete" is
+    // answerable from the audit trail alone.
+    const audit = await call('/api/audit', { session: admin });
+    assert.equal(audit.body.integrity.valid, true);
+    assert.ok(audit.body.items.some((item) => item.action === 'session.attendance.progress' && item.resourceId === session.body.id));
+  });
+
+  test('attendance on an assessed course completes the module but still withholds evidence', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const suffix = `AS${Date.now().toString(36).toUpperCase()}`;
+    const admin = world.admin;
+    const learner = world.learner;
+
+    // An assessed course whose only required module is attended, never assessed.
+    // recordModuleCompletion computes its final score from assessment-kind
+    // module completions, so a null-scored attendance contributes nothing and
+    // the pass gate withholds evidence. Attendance must not be a back door to
+    // competence.
+    const course = await call('/api/courses', {
+      session: admin, method: 'POST',
+      body: {
+        orgUnitId: admin.user.orgUnitId, code: `ASSESS-${suffix}`, title: `Assessed by attendance? ${suffix}`,
+        description: 'Attendance must not stand in for assessment', skillId: world.bootstrap.skills[0].id,
+        targetLevel: 4, evidenceRule: 'assessed', passingScore: 0.8, validityMonths: 12, status: 'draft'
+      }
+    });
+    const module = await call('/api/course-modules', {
+      session: admin, method: 'POST',
+      body: { courseId: course.body.id, title: 'Workshop', kind: 'lesson', durationMinutes: 60, required: true }
+    });
+    // An assessed course with no assessment module cannot be published at all —
+    // it could never award anything. Attach one so the course is publishable,
+    // and leave it unattempted.
+    const bank = await call('/api/assessment-banks', { session: world.analyst, method: 'POST', body: { orgUnitId: analystOrg(), code: `AS-${suffix}`, name: `Bank ${suffix}`, description: '' } });
+    const question = await call('/api/assessment-questions', {
+      session: world.analyst, method: 'POST',
+      body: { bankId: bank.body.id, questionType: 'true_false', prompt: 'Verified isolation?', options: {}, answerKey: { value: true }, points: 1, reviewStatus: 'approved' }
+    });
+    const exam = await call('/api/assessments', { session: world.analyst, method: 'POST', body: { orgUnitId: analystOrg(), code: `AS-${suffix}`, title: `Check ${suffix}`, assessmentType: 'quiz', passPercentage: 80, attemptLimit: 1 } });
+    await call('/api/assessments', { session: world.analyst, method: 'PATCH', body: { action: 'attach_question', assessmentId: exam.body.id, questionId: question.body.id } });
+    await call('/api/assessments', { session: world.analyst, method: 'PATCH', body: { action: 'publish', assessmentId: exam.body.id } });
+    const assessmentModule = await call('/api/course-modules', {
+      session: admin, method: 'POST',
+      body: { courseId: course.body.id, title: 'Final check', kind: 'assessment', durationMinutes: 10, required: true, assessmentId: exam.body.id }
+    });
+    assert.equal(assessmentModule.response.status, 201, JSON.stringify(assessmentModule.body));
+    assert.equal((await call('/api/course-modules', { session: admin, method: 'PATCH', body: { action: 'publish', courseId: course.body.id } })).response.status, 200);
+
+    const enrollment = await call('/api/enrollments', { session: admin, method: 'POST', body: { courseId: course.body.id, subjectUserId: learner.user.id, source: 'assigned' } });
+    const session = await call('/api/live-sessions', {
+      session: admin, method: 'POST',
+      body: {
+        orgUnitId: admin.user.orgUnitId, title: `Workshop ${suffix}`, description: '',
+        startsAt: new Date(Date.now() - 7_200_000).toISOString(), endsAt: new Date(Date.now() - 3_600_000).toISOString(),
+        timeZone: 'UTC', courseId: course.body.id, moduleId: module.body.id
+      }
+    });
+    await call('/api/session-attendance', { session: admin, method: 'POST', body: { action: 'register', sessionId: session.body.id, userIds: [learner.user.id] } });
+    const attended = await call('/api/session-attendance', {
+      session: admin, method: 'PATCH',
+      body: { action: 'record', sessionId: session.body.id, entries: [{ subjectUserId: learner.user.id, status: 'attended', minutesAttended: 60 }] }
+    });
+    assert.equal(attended.response.status, 200, JSON.stringify(attended.body));
+    assert.equal(attended.body.courseModuleCompletions, 1, 'the attended module is completed');
+
+    const enrollments = (await call('/api/enrollments', { session: learner })).body.items;
+    const row = enrollments.find((item) => item.id === enrollment.body.id);
+    assert.notEqual(row.status, 'completed', 'the unattempted assessment still stands between the learner and completion');
+    assert.equal(row.evidenceId ?? null, null, 'attendance is not a back door to competence evidence');
+  });
+
   test('an author cannot reach another tenant, and a learner cannot reach another learner', async (t) => {
     if (!world.postgres) return t.skip(skipReason);
 
