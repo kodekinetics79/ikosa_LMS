@@ -161,6 +161,11 @@ class PostgresRepository implements OsaRepository {
     return rows.map(map.toOrgUnit);
   }
 
+  async loadSnapshot(): Promise<import("../domain").Database> {
+    const { loadTenantSnapshot } = await import("./snapshot");
+    return loadTenantSnapshot(this.db);
+  }
+
   async listSkills(): Promise<Skill[]> {
     const { rows } = await this.db.query(
       "SELECT id, tenant_id, code, name, description FROM osa.skills WHERE status <> 'retired' ORDER BY code",

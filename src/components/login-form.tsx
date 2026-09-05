@@ -19,8 +19,11 @@ export function LoginForm() {
       const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
+        // Tenant-first: the workspace is part of the credential, not a
+        // fallback. The server resolves the slug to a tenant before it looks a
+        // user up, so the same address in two workspaces is two accounts.
         body: JSON.stringify({
-          tenantSlug: data.get("tenantSlug"),
+          tenantSlug: (data.get("tenantSlug") as string | null)?.trim().toLowerCase(),
           email: data.get("email"),
           password: data.get("password"),
         }),

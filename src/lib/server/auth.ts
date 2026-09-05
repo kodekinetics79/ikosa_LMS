@@ -5,6 +5,7 @@ import { withoutSecrets } from "./domain";
 import { appendAudit } from "./audit";
 import { hashPassword, id, secureToken, verifyPassword } from "./security";
 import { mutateDatabase, readDatabase } from "./store";
+import { rememberActor } from "./request-context";
 import { csrfMatches, scopeFromPrincipal } from "./db/postgres";
 import { toStorageId } from "./db/ids";
 import type { ActorScope, OsaPersistence, SessionRef } from "./db/repository";
@@ -456,7 +457,13 @@ export async function logout(request: Request, requestId: string): Promise<void>
 export async function resolvePrincipal(token: string | null): Promise<Principal> {
   if (!token) throw new AuthError(401, "Authentication required");
   const store = await postgres();
-  if (store) return resolvePrincipalWithPostgres(store, token);
+  if (store) {
+    const principal = await resolvePrincipalWithPostgres(store, token);
+    // Record the validated identity so the storage layer can open a tenant
+    // context without every caller threading a principal through to it.
+    rememberActor({ tenantId: principal.tenantId, userId: principal.user.id });
+    return principal;
+  }
   const database = await readDatabase();
   const session = database.sessions.find((candidate) => candidate.id === token);
   if (!session || new Date(session.expiresAt).getTime() <= Date.now()) throw new AuthError(401, "Session expired");
