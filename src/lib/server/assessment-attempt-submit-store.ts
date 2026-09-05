@@ -8,6 +8,7 @@ import { signAuditEvent } from "./db/audit-chain";
 import { assertRuntimeRoleIsSafe, inspectRuntimeRole, loadPgModule, withTenantTransaction, type Pool, type PoolClient } from "./db/driver";
 import * as map from "./db/mapping";
 import { conflict, forbidden, notFound } from "./errors";
+import { recordAssessmentCourseProgress } from "./assessment/course-completion";
 
 let poolPromise: Promise<Pool> | null = null;
 
@@ -201,6 +202,21 @@ export async function submitAssessmentAttemptSafely(
     );
 
     await appendAudit(client, principal, requestId, attemptId, attempt.assessmentId, earned, max, manualRequired, expired);
+
+    // An attempt that still needs a human marker has no final result yet, so
+    // there is nothing for a course to act on; the marking path calls this
+    // instead when it finalizes. In the same transaction either way, so a
+    // graded pass and the completion it causes commit together.
+    if (fullyGraded) {
+      await recordAssessmentCourseProgress(client, principal, {
+        assessmentId: attempt.assessmentId,
+        subjectUserId: scope.userId,
+        percentage: pct,
+        requestId,
+        attemptId,
+      });
+    }
+
     return toAttempt(updated[0]);
   });
 }

@@ -16,6 +16,7 @@ import {
 import { newId, pathToLtree, pathsToLtree } from "./db/ids";
 import * as map from "./db/mapping";
 import { conflict, forbidden, notFound, outOfRange } from "./errors";
+import { recordAssessmentCourseProgress } from "./assessment/course-completion";
 
 export type AssessmentSummary = Assessment & {
   itemCount: number;
@@ -457,6 +458,20 @@ export async function gradeAssessmentResponse(principal:Principal,responseId:str
     const earned=num(totals.rows[0].earned),max=num(totals.rows[0].max),pct=percentage(earned,max);
     const updated=await client.query(`UPDATE osa.assessment_attempts SET status='graded',graded_at=now(),grader_user_id=$2::uuid,score_points=$3::numeric,max_points=$4::numeric,percentage=$5::numeric,passed=$5::numeric >= $6::numeric WHERE id=$1::uuid RETURNING *`,[row.attempt_id,scope.userId,earned,max,pct,num(assessment.rows[0].pass_percentage)]);
     await appendAudit(client,principal,requestId,"assessment.response.grade","assessment_response",responseId,{score,maxPoints,finalized:true,attemptId:String(row.attempt_id),percentage:pct});
+
+    // The manual-marking twin of the auto-scored path. Both must call this or a
+    // course whose assessment contains one essay would never complete, however
+    // well the learner did. `subject_user_id` is the LEARNER's, read from the
+    // attempt - the marker is the actor here, not the subject.
+    const attemptRow=updated.rows[0];
+    await recordAssessmentCourseProgress(client,principal,{
+      assessmentId:String(row.assessment_id),
+      subjectUserId:String(attemptRow.subject_user_id),
+      percentage:pct,
+      requestId,
+      attemptId:String(row.attempt_id),
+    });
+
     return toAttempt(updated.rows[0]);
   });
 }
