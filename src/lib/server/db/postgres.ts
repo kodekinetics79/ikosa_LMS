@@ -56,7 +56,7 @@ const enrollmentColumns = (prefix = "en."): string =>
    ${prefix}assigned_by_user_id, ${prefix}due_date::text AS due_date, ${prefix}started_at,
    ${prefix}completed_at, ${prefix}score::float8 AS score, ${prefix}evidence_id, ${prefix}created_at`;
 const ENROLLMENT_COLUMNS = enrollmentColumns();
-const MODULE_COLUMNS = `m.id, m.tenant_id, m.course_id, m.position, m.title, m.kind, m.duration_minutes, m.required`;
+const MODULE_COLUMNS = `m.id, m.tenant_id, m.course_id, m.position, m.title, m.kind, m.duration_minutes, m.required, m.assessment_id`;
 
 /**
  * The synthetic `Database` shell handed to the pure domain functions.
@@ -936,6 +936,24 @@ export type CreateOptions = {
   /** Skip the ADR-001 role check. Only a migration/test harness should ever pass true. */
   skipRoleCheck?: boolean;
 };
+
+/**
+ * A repository bound to a transaction that is ALREADY open.
+ *
+ * `PostgresPersistence.read/write` open their own transaction, which is right
+ * for a request that does one thing. It is wrong for a caller that must do
+ * several things atomically — finalizing an assessment attempt and recording
+ * the course-module completion it satisfies have to commit together or not at
+ * all, and nesting `withTenantTransaction` inside another would silently give
+ * two commit points.
+ *
+ * The client passed here must already carry the tenant context
+ * (`withTenantTransaction` sets it), so this adds no privilege of its own: RLS
+ * governs every statement exactly as it does through the ordinary entry points.
+ */
+export function repositoryOnClient(client: Queryable, scope: ActorScope): OsaRepository {
+  return new PostgresRepository(client, scope);
+}
 
 /**
  * Returns null — never throws — when the `pg` driver is not installed or no

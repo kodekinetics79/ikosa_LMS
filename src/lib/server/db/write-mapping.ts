@@ -335,6 +335,7 @@ export function fromCourseModule(module: CourseModule): StorageRow {
     kind: module.kind,
     duration_minutes: module.durationMinutes,
     required: module.required,
+    assessment_id: toStorageIdOrNull(module.assessmentId),
   };
 }
 

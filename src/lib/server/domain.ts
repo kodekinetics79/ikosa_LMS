@@ -178,9 +178,28 @@ export type CourseModule = {
   courseId: Id;
   position: number;
   title: string;
+  /**
+   * What this step of the course IS.
+   *
+   * Only `lesson`, `document`, `video` and `assessment` are delivered. `scorm`
+   * is a value the schema has always accepted and that nothing implements — no
+   * player, no manifest parsing, no runtime, no CMI data model — so it is not
+   * offered by authoring and must not be described to a customer as supported.
+   * It is kept in the union rather than removed because removing it would need
+   * a data migration for a value no row currently holds.
+   */
   kind: "lesson" | "document" | "video" | "scorm" | "assessment";
   durationMinutes: number;
   required: boolean;
+  /**
+   * The assessment this module delivers, for `kind: "assessment"`.
+   *
+   * This is the join that lets a graded attempt satisfy a course requirement.
+   * Before it existed, an "assessment" module was a label and the learner typed
+   * their own score into a free-text box. Null on every other kind, which the
+   * schema enforces (migration 008).
+   */
+  assessmentId: Id | null;
 };
 
 export type Enrollment = {

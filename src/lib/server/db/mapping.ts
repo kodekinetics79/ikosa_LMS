@@ -237,6 +237,7 @@ export function toCourseModule(row: Row): CourseModule {
     id: str(row.id), tenantId: str(row.tenant_id), courseId: str(row.course_id),
     position: int(row.position), title: str(row.title), kind: str(row.kind) as CourseModule["kind"],
     durationMinutes: int(row.duration_minutes), required: bool(row.required),
+    assessmentId: strOrNull(row.assessment_id),
   };
 }
 
