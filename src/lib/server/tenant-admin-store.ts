@@ -13,8 +13,22 @@ import {
   type Pool,
   type PoolClient,
 } from "./db/driver";
-import { newId } from "./db/ids";
+import { ltreeToPath, newId, pathsToLtree } from "./db/ids";
 import * as map from "./db/mapping";
+
+/**
+ * `ActorScope.orgScopes` holds DOMAIN paths (`/a/b`). The `ltree` columns hold
+ * `a.b`, and binding the domain form straight into an `::ltree[]` parameter
+ * fails with "ltree syntax error at character 1" — which is exactly what every
+ * tenant-admin query did, so GET /api/admin/users and /api/admin/org-units both
+ * returned 500 the moment the application ran on PostgreSQL.
+ *
+ * PostgresRepository converts at the point of use; this store did not. Going
+ * through one named function means the next query cannot forget.
+ */
+function orgScopeLtree(scope: { orgScopes: readonly string[] }): string[] {
+  return pathsToLtree(scope.orgScopes);
+}
 
 export type TenantAdminOrgUnit = {
   id: string;
@@ -141,7 +155,7 @@ export async function listTenantOrgUnits(principal: Principal): Promise<TenantAd
         WHERE ou.path <@ ANY($1::ltree[])
         GROUP BY ou.id, ou.parent_id, ou.code, ou.name, ou.path
         ORDER BY nlevel(ou.path), ou.path`,
-      [scope.orgScopes],
+      [orgScopeLtree(scope)],
     );
     return rows.map((row) => ({
       id: String(row.id),
@@ -168,7 +182,7 @@ export async function listTenantUsers(principal: Principal): Promise<TenantAdmin
          JOIN osa.org_units ou ON ou.tenant_id = u.tenant_id AND ou.id = u.org_unit_id
         WHERE ou.path <@ ANY($1::ltree[])
         ORDER BY u.active DESC, u.display_name, u.email`,
-      [scope.orgScopes],
+      [orgScopeLtree(scope)],
     );
     return rows.map((row) => ({
       id: String(row.id),
@@ -191,12 +205,20 @@ export async function createTenantOrgUnit(principal: Principal, input: CreateTen
       `SELECT id::text, path::text
          FROM osa.org_units
         WHERE id = $1::uuid AND path <@ ANY($2::ltree[])`,
-      [input.parentId, scope.orgScopes],
+      [input.parentId, orgScopeLtree(scope)],
     );
     if (!parent.rows[0]) throw new Error("Parent organization is outside your delegated scope");
 
     const id = newId();
-    const path = `${parent.rows[0].path}.org_${id.replaceAll("-", "_")}`;
+    // The last ltree label MUST be the row's own uuid. `ltreeToPath` (used when
+    // a user's delegated_org_paths are read back) and `pathToLtree` (used to
+    // rebuild the SQL scope) are only inverses when every label is already a
+    // uuid — `toStorageId` maps any other string through uuid v5 and returns
+    // something different. A label of `org_<uuid with underscores>` therefore
+    // produced a delegated scope matching no row at all, so every user created
+    // under a newly created organization signed in to an empty workspace.
+    // PostgreSQL 16 accepts `-` in a label, so the uuid needs no re-encoding.
+    const path = `${parent.rows[0].path}.${id}`;
     const created = await client.query<{ id: string; parent_id: string; code: string; name: string; path: string }>(
       `INSERT INTO osa.org_units (id, tenant_id, parent_id, code, name, path)
        VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, text2ltree($6))
@@ -219,7 +241,7 @@ export async function createTenantUser(principal: Principal, input: CreateTenant
       `SELECT id::text, name, path::text
          FROM osa.org_units
         WHERE id = $1::uuid AND path <@ ANY($2::ltree[])`,
-      [input.orgUnitId, scope.orgScopes],
+      [input.orgUnitId, orgScopeLtree(scope)],
     );
     const org = organization.rows[0];
     if (!org) throw new Error("Organization is outside your delegated scope");
@@ -275,7 +297,7 @@ export async function setTenantUserActive(principal: Principal, userId: string, 
           AND ou.tenant_id = u.tenant_id
           AND ou.id = u.org_unit_id
           AND ou.path <@ ANY($3::ltree[])`,
-      [userId, active, scope.orgScopes],
+      [userId, active, orgScopeLtree(scope)],
     );
     if (!result.rowCount) throw new Error("User not found in your delegated scope");
     if (!active) await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid", [userId]);
@@ -301,7 +323,7 @@ export async function resetTenantUserPassword(
           AND ou.id = u.org_unit_id
           AND ou.path <@ ANY($3::ltree[])
         RETURNING u.id`,
-      [userId, hashPassword(password), scope.orgScopes],
+      [userId, hashPassword(password), orgScopeLtree(scope)],
     );
     if (!result.rowCount) throw new Error("User not found in your delegated scope");
     const revoked = await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid RETURNING id_hash", [userId]);
