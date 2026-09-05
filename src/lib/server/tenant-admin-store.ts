@@ -15,6 +15,7 @@ import {
 } from "./db/driver";
 import { ltreeToPath, newId, pathsToLtree } from "./db/ids";
 import * as map from "./db/mapping";
+import { conflict, forbidden, notFound } from "./errors";
 
 /**
  * `ActorScope.orgScopes` holds DOMAIN paths (`/a/b`). The `ltree` columns hold
@@ -84,7 +85,7 @@ async function runtimePool(): Promise<Pool> {
 }
 
 function requireTenantAdmin(principal: Principal): void {
-  if (!principal.roles.includes("tenant_admin")) throw new Error("Tenant administrator permission required");
+  if (!principal.roles.includes("tenant_admin")) throw forbidden("Tenant administrator permission required");
 }
 
 async function read<T>(principal: Principal, run: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -207,7 +208,7 @@ export async function createTenantOrgUnit(principal: Principal, input: CreateTen
         WHERE id = $1::uuid AND path <@ ANY($2::ltree[])`,
       [input.parentId, orgScopeLtree(scope)],
     );
-    if (!parent.rows[0]) throw new Error("Parent organization is outside your delegated scope");
+    if (!parent.rows[0]) throw forbidden("Parent organization is outside your delegated scope");
 
     const id = newId();
     // The last ltree label MUST be the row's own uuid. `ltreeToPath` (used when
@@ -244,7 +245,7 @@ export async function createTenantUser(principal: Principal, input: CreateTenant
       [input.orgUnitId, orgScopeLtree(scope)],
     );
     const org = organization.rows[0];
-    if (!org) throw new Error("Organization is outside your delegated scope");
+    if (!org) throw forbidden("Organization is outside your delegated scope");
 
     const id = newId();
     const created = await client.query<{ id: string; email: string; display_name: string; active: boolean; created_at: Date }>(
@@ -286,7 +287,7 @@ export async function createTenantUser(principal: Principal, input: CreateTenant
 
 export async function setTenantUserActive(principal: Principal, userId: string, active: boolean, requestId: string): Promise<void> {
   requireTenantAdmin(principal);
-  if (userId === principal.user.id && !active) throw new Error("You cannot deactivate your own tenant administrator account");
+  if (userId === principal.user.id && !active) throw conflict("You cannot deactivate your own tenant administrator account");
   await write(principal, async (client) => {
     const scope = scopeForPrincipal(principal);
     const result = await client.query(
@@ -299,7 +300,7 @@ export async function setTenantUserActive(principal: Principal, userId: string, 
           AND ou.path <@ ANY($3::ltree[])`,
       [userId, active, orgScopeLtree(scope)],
     );
-    if (!result.rowCount) throw new Error("User not found in your delegated scope");
+    if (!result.rowCount) throw notFound("User not found in your delegated scope");
     if (!active) await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid", [userId]);
     await appendTenantAudit(client, principal, requestId, active ? "tenant.user.activate" : "tenant.user.deactivate", "user", userId, { active });
   });
@@ -325,7 +326,7 @@ export async function resetTenantUserPassword(
         RETURNING u.id`,
       [userId, hashPassword(password), orgScopeLtree(scope)],
     );
-    if (!result.rowCount) throw new Error("User not found in your delegated scope");
+    if (!result.rowCount) throw notFound("User not found in your delegated scope");
     const revoked = await client.query("DELETE FROM osa.sessions WHERE user_id = $1::uuid RETURNING id_hash", [userId]);
     const revokedSessions = revoked.rowCount ?? 0;
     await appendTenantAudit(client, principal, requestId, "tenant.user.password.reset", "user", userId, { revokedSessions });

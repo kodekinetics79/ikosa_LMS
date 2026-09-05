@@ -7,6 +7,7 @@ import { scopeForPrincipal } from "./tenant-runtime";
 import { signAuditEvent } from "./db/audit-chain";
 import { assertRuntimeRoleIsSafe, inspectRuntimeRole, loadPgModule, withTenantTransaction, type Pool, type PoolClient } from "./db/driver";
 import * as map from "./db/mapping";
+import { conflict, forbidden, notFound } from "./errors";
 
 let poolPromise: Promise<Pool> | null = null;
 
@@ -87,7 +88,7 @@ export async function submitAssessmentAttemptSafely(
   attemptId: string,
   requestId: string,
 ): Promise<AssessmentAttempt> {
-  if (!principal.roles.includes("learner")) throw new Error("Learner permission required");
+  if (!principal.roles.includes("learner")) throw forbidden("Learner permission required");
   const scope = scopeForPrincipal(principal);
 
   return withTenantTransaction(await pool(), scope, async (client) => {
@@ -100,7 +101,7 @@ export async function submitAssessmentAttemptSafely(
       [attemptId, scope.userId],
     );
     const attemptRow = attemptRows.rows[0];
-    if (!attemptRow) throw new Error("Active attempt not found");
+    if (!attemptRow) throw notFound("Active attempt not found");
     const attempt = toAttempt(attemptRow);
 
     const { rows: items } = await client.query(
@@ -116,7 +117,7 @@ export async function submitAssessmentAttemptSafely(
         ORDER BY i.position`,
       [attempt.assessmentId],
     );
-    if (!items.length) throw new Error("Assessment has no questions");
+    if (!items.length) throw conflict("Assessment has no questions");
 
     const responseRows = await client.query<{ id: string; question_id: string; response: unknown }>(
       "SELECT id::text,question_id::text,response FROM osa.assessment_responses WHERE attempt_id=$1::uuid",
@@ -124,7 +125,7 @@ export async function submitAssessmentAttemptSafely(
     );
     const byQuestion = new Map(responseRows.rows.map((row) => [row.question_id, row]));
     const missing = items.filter((item) => bool(item.required) && !byQuestion.has(String(item.question_id)));
-    if (missing.length) throw new Error(`${missing.length} required question${missing.length === 1 ? " is" : "s are"} unanswered`);
+    if (missing.length) throw conflict(`${missing.length} required question${missing.length === 1 ? " is" : "s are"} unanswered`);
 
     let earned = 0;
     let max = 0;

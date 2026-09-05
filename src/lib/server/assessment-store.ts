@@ -15,6 +15,7 @@ import {
 } from "./db/driver";
 import { newId, pathToLtree, pathsToLtree } from "./db/ids";
 import * as map from "./db/mapping";
+import { conflict, forbidden, notFound, outOfRange } from "./errors";
 
 export type AssessmentSummary = Assessment & {
   itemCount: number;
@@ -95,13 +96,13 @@ const canGrade = (principal: Principal) => principal.roles.some((role) => role =
 const canAttempt = (principal: Principal) => principal.roles.includes("learner");
 
 function requireAuthor(principal: Principal): void {
-  if (!canAuthor(principal)) throw new Error("Assessment authoring permission required");
+  if (!canAuthor(principal)) throw forbidden("Assessment authoring permission required");
 }
 function requireGrader(principal: Principal): void {
-  if (!canGrade(principal)) throw new Error("Assessment grading permission required");
+  if (!canGrade(principal)) throw forbidden("Assessment grading permission required");
 }
 function requireLearner(principal: Principal): void {
-  if (!canAttempt(principal)) throw new Error("Learner permission required");
+  if (!canAttempt(principal)) throw forbidden("Learner permission required");
 }
 
 function num(value: unknown): number { return typeof value === "number" ? value : Number(value); }
@@ -192,7 +193,7 @@ export async function createQuestionBank(principal: Principal, input: CreateBank
   return write(principal, async (client) => {
     const scope = scopeForPrincipal(principal); const { roots } = scopePaths(principal);
     const org = await client.query(`SELECT id FROM osa.org_units WHERE id=$1::uuid AND path <@ ANY($2::ltree[])`, [input.orgUnitId,roots]);
-    if (!org.rowCount) throw new Error("Organization is outside your delegated scope");
+    if (!org.rowCount) throw forbidden("Organization is outside your delegated scope");
     const id = newId();
     const { rows } = await client.query(
       `INSERT INTO osa.question_banks (id,tenant_id,org_unit_id,code,name,description,status,created_by)
@@ -210,7 +211,7 @@ export async function createAssessmentQuestion(principal: Principal, input: Crea
   return write(principal, async (client) => {
     const scope=scopeForPrincipal(principal); const { roots }=scopePaths(principal);
     const bank=await client.query(`SELECT b.id FROM osa.question_banks b JOIN osa.org_units ou ON ou.tenant_id=b.tenant_id AND ou.id=b.org_unit_id WHERE b.id=$1::uuid AND ou.path <@ ANY($2::ltree[]) AND b.status<>'retired'`,[input.bankId,roots]);
-    if(!bank.rowCount) throw new Error("Question bank is outside your delegated scope");
+    if(!bank.rowCount) throw forbidden("Question bank is outside your delegated scope");
     const reviewStatus=input.origin==="ai" ? "draft" : input.reviewStatus;
     const id=newId();
     const {rows}=await client.query(
@@ -224,31 +225,13 @@ export async function createAssessmentQuestion(principal: Principal, input: Crea
   });
 }
 
-export async function listAssessments(principal: Principal): Promise<AssessmentSummary[]> {
-  return read(principal, async (client) => {
-    const { roots,viewer }=scopePaths(principal);
-    const author=canAuthor(principal) || canGrade(principal);
-    const where=author ? `ou.path <@ ANY($1::ltree[])` : `a.status='published' AND ou.path @> $2::ltree`;
-    const {rows}=await client.query(
-      `SELECT a.*,
-              (SELECT count(*)::int FROM osa.assessment_items i WHERE i.assessment_id=a.id) AS item_count,
-              (SELECT count(*)::int FROM osa.assessment_attempts x WHERE x.assessment_id=a.id ${author ? "" : "AND x.subject_user_id=$3::uuid"}) AS attempt_count,
-              (SELECT count(*)::int FROM osa.assessment_attempts x WHERE x.assessment_id=a.id AND x.status='submitted') AS pending_marking
-         FROM osa.assessments a JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
-        WHERE ${where}
-        ORDER BY a.updated_at DESC`,
-      [roots,viewer,scopeForPrincipal(principal).userId]);
-    return rows.map((row)=>({...toAssessment(row),itemCount:num(row.item_count),attemptCount:num(row.attempt_count),pendingMarking:author?num(row.pending_marking):0}));
-  });
-}
-
 export async function createAssessment(principal: Principal,input:CreateAssessmentInput):Promise<AssessmentSummary>{
   requireAuthor(principal);
   return write(principal,async(client)=>{
     const scope=scopeForPrincipal(principal); const {roots}=scopePaths(principal);
     const org=await client.query(`SELECT id FROM osa.org_units WHERE id=$1::uuid AND path <@ ANY($2::ltree[])`,[input.orgUnitId,roots]);
-    if(!org.rowCount) throw new Error("Organization is outside your delegated scope");
-    if(input.courseId){const course=await client.query(`SELECT c.id FROM osa.courses c JOIN osa.org_units ou ON ou.tenant_id=c.tenant_id AND ou.id=c.org_unit_id WHERE c.id=$1::uuid AND (ou.path <@ ANY($2::ltree[]) OR ou.path @> $3::ltree)`,[input.courseId,roots,scopePaths(principal).viewer]);if(!course.rowCount)throw new Error("Course is outside your delegated scope");}
+    if(!org.rowCount) throw forbidden("Organization is outside your delegated scope");
+    if(input.courseId){const course=await client.query(`SELECT c.id FROM osa.courses c JOIN osa.org_units ou ON ou.tenant_id=c.tenant_id AND ou.id=c.org_unit_id WHERE c.id=$1::uuid AND (ou.path <@ ANY($2::ltree[]) OR ou.path @> $3::ltree)`,[input.courseId,roots,scopePaths(principal).viewer]);if(!course.rowCount)throw forbidden("Course is outside your delegated scope");}
     const id=newId();
     const {rows}=await client.query(
       `INSERT INTO osa.assessments
@@ -266,9 +249,9 @@ export async function addQuestionToAssessment(principal:Principal,assessmentId:s
   await write(principal,async(client)=>{
     const {roots}=scopePaths(principal);
     const assessment=await client.query(`SELECT a.id FROM osa.assessments a JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id WHERE a.id=$1::uuid AND a.status='draft' AND ou.path <@ ANY($2::ltree[])`,[assessmentId,roots]);
-    if(!assessment.rowCount)throw new Error("Draft assessment not found in your scope");
+    if(!assessment.rowCount)throw notFound("Draft assessment not found in your scope");
     const question=await client.query(`SELECT q.id FROM osa.assessment_questions q JOIN osa.question_banks b ON b.tenant_id=q.tenant_id AND b.id=q.bank_id JOIN osa.org_units ou ON ou.tenant_id=b.tenant_id AND ou.id=b.org_unit_id WHERE q.id=$1::uuid AND ou.path <@ ANY($2::ltree[])`,[questionId,roots]);
-    if(!question.rowCount)throw new Error("Question not found in your scope");
+    if(!question.rowCount)throw notFound("Question not found in your scope");
     const pos=await client.query<{next:number}>(`SELECT coalesce(max(position),0)::int+1 AS next FROM osa.assessment_items WHERE assessment_id=$1::uuid`,[assessmentId]);
     await client.query(`INSERT INTO osa.assessment_items (tenant_id,assessment_id,question_id,position) VALUES (osa.current_tenant_id(),$1::uuid,$2::uuid,$3) ON CONFLICT (tenant_id,assessment_id,question_id) DO NOTHING`,[assessmentId,questionId,pos.rows[0].next]);
     await client.query(`UPDATE osa.assessments SET updated_at=now() WHERE id=$1::uuid`,[assessmentId]);
@@ -290,9 +273,9 @@ export async function publishAssessment(principal:Principal,assessmentId:string,
          LEFT JOIN osa.assessment_questions q ON q.tenant_id=i.tenant_id AND q.id=i.question_id
         WHERE a.id=$1::uuid AND a.status='draft' AND ou.path <@ ANY($2::ltree[])
         GROUP BY a.id`,[assessmentId,roots]);
-    const row=result.rows[0]; if(!row)throw new Error("Draft assessment not found in your scope");
-    if(num(row.items)<1)throw new Error("Add at least one question before publishing");
-    if(num(row.unapproved)>0)throw new Error("Every assessment question must be approved before publishing");
+    const row=result.rows[0]; if(!row)throw notFound("Draft assessment not found in your scope");
+    if(num(row.items)<1)throw conflict("Add at least one question before publishing");
+    if(num(row.unapproved)>0)throw conflict("Every assessment question must be approved before publishing");
     await client.query(`UPDATE osa.assessments SET status='published',updated_at=now() WHERE id=$1::uuid`,[assessmentId]);
     await appendAudit(client,principal,requestId,"assessment.publish","assessment",assessmentId,{items:num(row.items)});
   });
@@ -305,7 +288,7 @@ async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,att
        FROM osa.assessment_attempts x JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
        JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
       WHERE x.id=$1::uuid AND x.subject_user_id=$2::uuid AND ou.path @> $3::ltree`,[attemptId,scope.userId,viewer]);
-  if(!rows[0])throw new Error("Attempt not found");
+  if(!rows[0])throw notFound("Attempt not found");
   const attempt=toAttempt(rows[0]);
   const questions=await client.query(
     `SELECT q.id,i.position,q.question_type,q.prompt,q.options,
@@ -329,62 +312,15 @@ export async function startAssessmentAttempt(principal:Principal,assessmentId:st
       `SELECT a.* FROM osa.assessments a JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
         WHERE a.id=$1::uuid AND a.status='published' AND ou.path @> $2::ltree
           AND (a.opens_at IS NULL OR a.opens_at<=now()) AND (a.closes_at IS NULL OR a.closes_at>now())`,[assessmentId,viewer]);
-    if(!assessment.rows[0])throw new Error("Assessment is not available");
+    if(!assessment.rows[0])throw notFound("Assessment is not available");
     const existing=await client.query<{id:string}>(`SELECT id::text FROM osa.assessment_attempts WHERE assessment_id=$1::uuid AND subject_user_id=$2::uuid AND status='in_progress' ORDER BY attempt_number DESC LIMIT 1`,[assessmentId,scope.userId]);
     if(existing.rows[0])return learnerAttemptWorkspace(client,principal,existing.rows[0].id);
     const counts=await client.query<{used:number;next:number}>(`SELECT count(*)::int AS used,coalesce(max(attempt_number),0)::int+1 AS next FROM osa.assessment_attempts WHERE assessment_id=$1::uuid AND subject_user_id=$2::uuid AND status<>'void'`,[assessmentId,scope.userId]);
-    if(num(counts.rows[0].used)>=num(assessment.rows[0].attempt_limit))throw new Error("Attempt limit reached");
+    if(num(counts.rows[0].used)>=num(assessment.rows[0].attempt_limit))throw conflict("Attempt limit reached");
     const id=newId();
     await client.query(`INSERT INTO osa.assessment_attempts (id,tenant_id,assessment_id,subject_user_id,attempt_number,status) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,'in_progress')`,[id,scope.tenantId,assessmentId,scope.userId,counts.rows[0].next]);
     await appendAudit(client,principal,requestId,"assessment.attempt.start","assessment_attempt",id,{assessmentId,attemptNumber:counts.rows[0].next});
     return learnerAttemptWorkspace(client,principal,id);
-  });
-}
-
-export async function saveAssessmentResponse(principal:Principal,attemptId:string,questionId:string,response:unknown):Promise<void>{
-  requireLearner(principal);
-  await write(principal,async(client)=>{
-    const scope=scopeForPrincipal(principal);
-    const valid=await client.query(`SELECT 1 FROM osa.assessment_attempts x JOIN osa.assessment_items i ON i.tenant_id=x.tenant_id AND i.assessment_id=x.assessment_id WHERE x.id=$1::uuid AND x.subject_user_id=$2::uuid AND x.status='in_progress' AND i.question_id=$3::uuid`,[attemptId,scope.userId,questionId]);
-    if(!valid.rowCount)throw new Error("Question is not writable in this attempt");
-    await client.query(
-      `INSERT INTO osa.assessment_responses (id,tenant_id,attempt_id,question_id,response,answered_at)
-       VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::jsonb,now())
-       ON CONFLICT (tenant_id,attempt_id,question_id) DO UPDATE SET response=excluded.response,answered_at=now(),auto_score=NULL,manual_score=NULL,final_score=NULL,feedback='',graded_by=NULL,graded_at=NULL`,
-      [newId(),scope.tenantId,attemptId,questionId,JSON.stringify(response)]);
-  });
-}
-
-export async function submitAssessmentAttempt(principal:Principal,attemptId:string,requestId:string):Promise<AssessmentAttempt>{
-  requireLearner(principal);
-  return write(principal,async(client)=>{
-    const scope=scopeForPrincipal(principal);
-    const attemptRows=await client.query(`SELECT x.*,a.pass_percentage FROM osa.assessment_attempts x JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id WHERE x.id=$1::uuid AND x.subject_user_id=$2::uuid AND x.status='in_progress' FOR UPDATE OF x`,[attemptId,scope.userId]);
-    if(!attemptRows.rows[0])throw new Error("Active attempt not found");
-    const attempt=toAttempt(attemptRows.rows[0]);
-    const items=await client.query(
-      `SELECT i.question_id,i.required,coalesce(i.points_override,q.points)::float8 AS points,q.*
-       FROM osa.assessment_items i JOIN osa.assessment_questions q ON q.tenant_id=i.tenant_id AND q.id=i.question_id
-       WHERE i.assessment_id=$1::uuid ORDER BY i.position`,[attempt.assessmentId]);
-    const responseRows=await client.query(`SELECT id,question_id,response FROM osa.assessment_responses WHERE attempt_id=$1::uuid`,[attemptId]);
-    const byQuestion=new Map(responseRows.rows.map((row)=>[String(row.question_id),row]));
-    const missing=items.rows.filter((item)=>bool(item.required)&&!byQuestion.has(String(item.question_id)));
-    if(missing.length)throw new Error(`${missing.length} required question${missing.length===1?" is":"s are"} unanswered`);
-    let earned=0; let max=0; let manualRequired=false;
-    for(const item of items.rows){
-      const points=num(item.points); max+=points; const response=byQuestion.get(String(item.question_id));
-      if(!response)continue;
-      const question=toQuestion(item); const scored=scoreObjectiveQuestion(question,response.response,points);
-      if(scored.manualRequired){manualRequired=true;continue;}
-      earned+=scored.score??0;
-      await client.query(`UPDATE osa.assessment_responses SET auto_score=$2,final_score=$2,graded_at=now() WHERE id=$1::uuid`,[response.id,scored.score]);
-    }
-    const pct=percentage(earned,max); const graded=!manualRequired;
-    const updated=await client.query(
-      `UPDATE osa.assessment_attempts SET status=$2,submitted_at=now(),graded_at=CASE WHEN $3 THEN now() ELSE NULL END,score_points=$4,max_points=$5,percentage=CASE WHEN $3 THEN $6 ELSE NULL END,passed=CASE WHEN $3 THEN $6 >= $7 ELSE NULL END
-       WHERE id=$1::uuid RETURNING *`,[attemptId,graded?"graded":"submitted",graded,earned,max,pct,num(attemptRows.rows[0].pass_percentage)]);
-    await appendAudit(client,principal,requestId,"assessment.attempt.submit","assessment_attempt",attemptId,{assessmentId:attempt.assessmentId,manualRequired,objectiveScore:earned,maxPoints:max});
-    return toAttempt(updated.rows[0]);
   });
 }
 
@@ -400,8 +336,8 @@ export async function gradeAssessmentResponse(principal:Principal,responseId:str
        JOIN osa.assessment_items i ON i.tenant_id=x.tenant_id AND i.assessment_id=x.assessment_id AND i.question_id=r.question_id
        JOIN osa.assessment_questions q ON q.tenant_id=r.tenant_id AND q.id=r.question_id
        WHERE r.id=$1::uuid AND x.status='submitted' AND ou.path <@ ANY($2::ltree[]) FOR UPDATE OF r`,[responseId,roots]);
-    const row=response.rows[0]; if(!row)throw new Error("Response is not available for marking");
-    const maxPoints=num(row.max_points); if(!Number.isFinite(score)||score<0||score>maxPoints)throw new Error(`Score must be between 0 and ${maxPoints}`);
+    const row=response.rows[0]; if(!row)throw notFound("Response is not available for marking");
+    const maxPoints=num(row.max_points); if(!Number.isFinite(score)||score<0||score>maxPoints)throw outOfRange(`Score must be between 0 and ${maxPoints}`);
     await client.query(`UPDATE osa.assessment_responses SET manual_score=$2,final_score=$2,feedback=$3,graded_by=$4::uuid,graded_at=now() WHERE id=$1::uuid`,[responseId,score,feedback,scope.userId]);
     const remaining=await client.query<{count:number}>(
       `SELECT count(*)::int AS count FROM osa.assessment_items i

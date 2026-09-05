@@ -4,6 +4,7 @@ import type { Principal } from "./auth";
 import { scopeForPrincipal } from "./tenant-runtime";
 import { assertRuntimeRoleIsSafe, inspectRuntimeRole, loadPgModule, withTenantTransaction, type Pool } from "./db/driver";
 import { newId } from "./db/ids";
+import { conflict, forbidden } from "./errors";
 
 let poolPromise: Promise<Pool> | null = null;
 
@@ -32,7 +33,7 @@ export async function saveTimedAssessmentResponse(
   questionId: string,
   response: unknown,
 ): Promise<void> {
-  if (!principal.roles.includes("learner")) throw new Error("Learner permission required");
+  if (!principal.roles.includes("learner")) throw forbidden("Learner permission required");
   const scope = scopeForPrincipal(principal);
   await withTenantTransaction(await pool(), scope, async (client) => {
     const writable = await client.query(
@@ -50,7 +51,7 @@ export async function saveTimedAssessmentResponse(
           AND (a.closes_at IS NULL OR a.closes_at > now())`,
       [attemptId, scope.userId, questionId],
     );
-    if (!writable.rowCount) throw new Error("This assessment is no longer accepting answer changes");
+    if (!writable.rowCount) throw conflict("This assessment is no longer accepting answer changes");
 
     await client.query(
       `INSERT INTO osa.assessment_responses
