@@ -107,6 +107,17 @@ export function AssessmentWorkspaceClient({
   const [tab, setTab] = useState<Tab>(capabilities.learner && !capabilities.author && !capabilities.grader ? "assessments" : "assessments");
   const [showAssessmentForm, setShowAssessmentForm] = useState(false);
   const [showBankForm, setShowBankForm] = useState(false);
+  /**
+   * Library filters.
+   *
+   * `listAuthorQuestions` returns every question in scope, unbounded and
+   * unordered beyond `updated_at DESC`. On a real tenant that is a wall of
+   * prompts with no way to find one, and the bank rail items were inert
+   * `<div>`s that did nothing when clicked.
+   */
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [libraryBank, setLibraryBank] = useState("all");
+  const [libraryReview, setLibraryReview] = useState("all");
   const [showQuestionForm, setShowQuestionForm] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -194,6 +205,40 @@ export function AssessmentWorkspaceClient({
       setShowQuestionForm(false);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create question"); }
     finally { setBusy(""); }
+  }
+
+  /**
+   * The review gate, reachable from the library.
+   *
+   * Publication requires every question to be approved, and the store forces an
+   * `origin: "ai"` question to `draft` whatever the caller asks for — so
+   * without this control an AI-generated question had no route to publication
+   * at all, and the publish blocker naming it was unresolvable.
+   */
+  const visibleQuestions = questions.filter((question) => {
+    if (libraryBank !== "all" && question.bankId !== libraryBank) return false;
+    if (libraryReview !== "all" && question.reviewStatus !== libraryReview) return false;
+    if (!librarySearch.trim()) return true;
+    const needle = librarySearch.trim().toLowerCase();
+    return question.prompt.toLowerCase().includes(needle)
+      || question.bankName.toLowerCase().includes(needle)
+      || question.questionType.includes(needle);
+  });
+
+  async function reviewQuestion(questionId: string, reviewStatus: "approved" | "rejected") {
+    setBusy(`review:${questionId}`); setError("");
+    try {
+      const response = await fetch("/api/assessment-questions", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify({ action: "review", questionId, reviewStatus }),
+      });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to record that review decision");
+      setQuestions((current) => current.map((item) => item.id === questionId ? { ...item, reviewStatus } : item));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to record that review decision");
+    } finally { setBusy(""); }
   }
 
   async function attachQuestion(questionId: string) {
@@ -287,8 +332,29 @@ export function AssessmentWorkspaceClient({
       </div> : null}
 
       {tab === "library" && capabilities.author ? <div className={styles.library}>
-        <div className={styles.bankRail}><div className={styles.railTitle}><span>Question banks</span><button type="button" onClick={() => setShowBankForm(true)}>+</button></div>{banks.length ? banks.map((bank) => <div className={styles.bankItem} key={bank.id}><strong>{bank.name}</strong><span>{bank.code}</span><small>{questions.filter((question) => question.bankId === bank.id).length} questions</small></div>) : <div className={styles.railEmpty}>Create a bank to organize reusable questions.</div>}</div>
-        <div className={styles.questionList}>{questions.length ? questions.map((question) => <article className={styles.questionRow} key={question.id}><div className={styles.questionMeta}><span>{questionTypeLabel(question.questionType)}</span><span>Difficulty {question.difficulty}/5</span><span>{question.bloomLevel}</span><span className={question.reviewStatus === "approved" ? styles.approved : styles.draftTag}>{question.reviewStatus}</span></div><h3>{question.prompt}</h3><p>{question.rationale || `Stored in ${question.bankName}`}</p><div className={styles.questionFooter}><span>{question.points} point{question.points === 1 ? "" : "s"} · {question.origin}</span><button className={styles.ghostButton} type="button" disabled={!selectedAssessmentId || busy === `attach:${question.id}`} onClick={() => attachQuestion(question.id)}>{busy === `attach:${question.id}` ? "Adding…" : selectedAssessmentId ? "Add to assessment" : "Select assessment first"}</button></div></article>) : <div className={styles.empty}><strong>No questions yet.</strong>Create the first reusable question.</div>}</div>
+        <div className={styles.bankRail}>
+          <div className={styles.railTitle}><span>Question banks</span><button type="button" aria-label="Create a question bank" onClick={() => setShowBankForm(true)}>+</button></div>
+          {/* Clicking a bank filters the list. These were inert divs, so the
+              rail showed counts and did nothing. */}
+          <button type="button" className={`${styles.bankItem} ${libraryBank === "all" ? styles.bankItemActive : ""}`} aria-pressed={libraryBank === "all"} onClick={() => setLibraryBank("all")}>
+            <strong>All banks</strong><span>Everything in scope</span><small>{questions.length} questions</small>
+          </button>
+          {banks.length ? banks.map((bank) => <button type="button" className={`${styles.bankItem} ${libraryBank === bank.id ? styles.bankItemActive : ""}`} aria-pressed={libraryBank === bank.id} key={bank.id} onClick={() => setLibraryBank(libraryBank === bank.id ? "all" : bank.id)}>
+            <strong>{bank.name}</strong><span>{bank.code}</span><small>{questions.filter((question) => question.bankId === bank.id).length} questions</small>
+          </button>) : <div className={styles.railEmpty}>Create a bank to organize reusable questions.</div>}
+        </div>
+        <div className={styles.questionList}>
+          <div className={styles.libraryFilters}>
+            <input type="search" value={librarySearch} placeholder="Search prompts, banks and types…" aria-label="Search the question library" onChange={(event) => setLibrarySearch(event.target.value)} />
+            <select value={libraryReview} aria-label="Filter by review status" onChange={(event) => setLibraryReview(event.target.value)}>
+              <option value="all">Any review status</option>
+              <option value="draft">Awaiting review</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <span>{visibleQuestions.length} of {questions.length}</span>
+          </div>
+          {visibleQuestions.length ? visibleQuestions.map((question) => <article className={styles.questionRow} key={question.id}><div className={styles.questionMeta}><span>{questionTypeLabel(question.questionType)}</span><span>Difficulty {question.difficulty}/5</span><span>{question.bloomLevel}</span><span className={question.reviewStatus === "approved" ? styles.approved : styles.draftTag}>{question.reviewStatus}</span></div><h3>{question.prompt}</h3><p>{question.rationale || `Stored in ${question.bankName}`}</p><div className={styles.questionFooter}><span>{question.points} point{question.points === 1 ? "" : "s"} · {question.origin}</span><div className={styles.questionActions}>{question.reviewStatus !== "approved" ? <button className={styles.ghostButton} type="button" disabled={busy === `review:${question.id}`} onClick={() => reviewQuestion(question.id, "approved")}>{busy === `review:${question.id}` ? "Saving…" : "Approve"}</button> : null}{question.reviewStatus === "draft" ? <button className={styles.ghostButton} type="button" disabled={busy === `review:${question.id}`} onClick={() => reviewQuestion(question.id, "rejected")}>Reject</button> : null}<button className={styles.ghostButton} type="button" disabled={!selectedAssessmentId || busy === `attach:${question.id}`} onClick={() => attachQuestion(question.id)}>{busy === `attach:${question.id}` ? "Adding…" : selectedAssessmentId ? "Add to assessment" : "Select assessment first"}</button></div></div></article>) : <div className={styles.empty}><strong>{questions.length ? "No question matches those filters." : "No questions yet."}</strong>{questions.length ? "Clear the search or choose a different bank." : "Create the first reusable question."}</div>}</div>
       </div> : null}
 
       {tab === "marking" && capabilities.grader ? <div className={styles.markingList}>{marking.length ? marking.map((item) => { const draft = gradeDrafts[item.responseId] ?? { score: "", feedback: "" }; return <article className={styles.markingCard} key={item.responseId}><header><div><span>{item.assessmentCode}</span><h3>{item.assessmentTitle}</h3></div><div className={styles.learnerBadge}><strong>{item.learnerName}</strong><span>{item.learnerEmail}</span></div></header><div className={styles.markingBody}><div><small>Question · {questionTypeLabel(item.questionType)}</small><h4>{item.prompt}</h4><div className={styles.responseBox}><span>Learner response</span><p>{previewResponse(item.response)}</p></div>{item.rationale ? <div className={styles.rationale}><span>Marker guidance</span><p>{item.rationale}</p></div> : null}</div><div className={styles.gradePanel}><label>Score <span>out of {item.maxPoints}</span><input type="number" min="0" max={item.maxPoints} step="0.25" value={draft.score} onChange={(event) => setGradeDrafts((current) => ({ ...current, [item.responseId]: { ...draft, score: event.target.value } }))}/></label><label>Feedback<textarea rows={5} value={draft.feedback} onChange={(event) => setGradeDrafts((current) => ({ ...current, [item.responseId]: { ...draft, feedback: event.target.value } }))} placeholder="Specific, useful feedback for the learner"/></label><button className={styles.primaryButton} type="button" disabled={busy === `grade:${item.responseId}`} onClick={() => grade(item)}>{busy === `grade:${item.responseId}` ? "Saving…" : "Save mark"}</button></div></div></article>; }) : <div className={styles.empty}><strong>Marking queue is clear.</strong>Subjective answers waiting for a human decision will appear here.</div>}</div> : null}
