@@ -446,6 +446,121 @@ describe('assessment engine', () => {
     assert.match(second.body.error, /attempt limit/i);
   });
 
+  test('the exam builder can change every item setting a draft owns', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const suffix = `B${Date.now().toString(36).toUpperCase()}`;
+    const author = world.analyst;
+    const bank = await call('/api/assessment-banks', {
+      session: author, method: 'POST',
+      body: { orgUnitId: analystOrg(), code: `BLD-${suffix}`, name: `Builder bank ${suffix}`, description: '' }
+    });
+    assert.equal(bank.response.status, 201, JSON.stringify(bank.body));
+
+    // A key naming an option that does not exist produced a question no learner
+    // could ever answer correctly, and nothing rejected it. It must be refused
+    // at authoring time, with the field named.
+    const unanswerable = await call('/api/assessment-questions', {
+      session: author, method: 'POST',
+      body: {
+        bankId: bank.body.id, questionType: 'single_choice', prompt: 'Broken by construction',
+        options: { choices: [{ id: 'o1', label: 'A' }, { id: 'o2', label: 'B' }] },
+        answerKey: { value: 'o9' }, points: 1
+      }
+    });
+    assert.equal(unanswerable.response.status, 400, JSON.stringify(unanswerable.body));
+    assert.match(unanswerable.body.fields.answerKey, /not one of the options/i);
+
+    const make = (body) => call('/api/assessment-questions', { session: author, method: 'POST', body: { bankId: bank.body.id, ...body } });
+    const first = await make({ questionType: 'single_choice', prompt: 'Pick A', options: { choices: [{ id: 'o1', label: 'A' }, { id: 'o2', label: 'B' }] }, answerKey: { value: 'o1' }, points: 2, reviewStatus: 'approved' });
+    const second = await make({ questionType: 'true_false', prompt: 'Least privilege helps?', options: {}, answerKey: { value: true }, points: 3, reviewStatus: 'approved' });
+    // origin: "ai" is forced to draft by the store, whatever the caller asks
+    // for. That rule is the reason the review gate has to exist.
+    const generated = await make({ questionType: 'long_text', prompt: 'Explain least privilege', options: {}, answerKey: {}, points: 5, origin: 'ai', reviewStatus: 'approved' });
+    assert.equal(generated.response.status, 201, JSON.stringify(generated.body));
+    assert.equal(generated.body.reviewStatus, 'draft', 'an AI-generated question is never born approved');
+
+    const exam = await call('/api/assessments', {
+      session: author, method: 'POST',
+      body: { orgUnitId: analystOrg(), code: `BLD-${suffix}`, title: `Builder exam ${suffix}`, assessmentType: 'exam', durationMinutes: 20, passPercentage: 60, attemptLimit: 2 }
+    });
+    assert.equal(exam.response.status, 201, JSON.stringify(exam.body));
+    for (const question of [first, second, generated]) {
+      const attached = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'attach_question', assessmentId: exam.body.id, questionId: question.body.id } });
+      assert.equal(attached.response.status, 200, JSON.stringify(attached.body));
+    }
+
+    const detail = await call(`/api/assessments/${exam.body.id}`, { session: author });
+    assert.equal(detail.response.status, 200, JSON.stringify(detail.body));
+    assert.equal(detail.body.items.length, 3);
+    assert.equal(detail.body.totalPoints, 10);
+    assert.deepEqual(detail.body.items.map((item) => item.position), [1, 2, 3]);
+    assert.deepEqual(detail.body.publishBlockers.map((blocker) => blocker.code), ['unapproved_questions']);
+
+    // The publish gate the review workflow exists to serve.
+    const blocked = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'publish', assessmentId: exam.body.id } });
+    assert.equal(blocked.response.status, 409, JSON.stringify(blocked.body));
+
+    const reviewed = await call('/api/assessment-questions', { session: author, method: 'PATCH', body: { action: 'review', questionId: generated.body.id, reviewStatus: 'approved' } });
+    assert.equal(reviewed.response.status, 200, JSON.stringify(reviewed.body));
+
+    const ids = detail.body.items.map((item) => item.questionId);
+    // A partial order must be refused, not silently applied — dropping an item
+    // from an exam because the client sent a short list is unrecoverable.
+    const partial = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'reorder_questions', assessmentId: exam.body.id, questionIds: [ids[0]] } });
+    assert.equal(partial.response.status, 409, JSON.stringify(partial.body));
+
+    const reordered = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'reorder_questions', assessmentId: exam.body.id, questionIds: [ids[2], ids[0], ids[1]] } });
+    assert.equal(reordered.response.status, 200, JSON.stringify(reordered.body));
+
+    // points_override and required were read by six queries and written by
+    // none, so every item was permanently required at the question's own points.
+    const overridden = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'set_item', assessmentId: exam.body.id, questionId: ids[0], pointsOverride: 9, required: false } });
+    assert.equal(overridden.response.status, 200, JSON.stringify(overridden.body));
+
+    const updated = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'update', assessmentId: exam.body.id, title: `Builder exam ${suffix} v2`, shuffleQuestions: true, shuffleOptions: true } });
+    assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.title, `Builder exam ${suffix} v2`);
+    assert.equal(updated.body.shuffleQuestions, true);
+
+    const afterEdits = await call(`/api/assessments/${exam.body.id}`, { session: author });
+    assert.deepEqual(afterEdits.body.items.map((item) => item.questionId), [ids[2], ids[0], ids[1]]);
+    assert.equal(afterEdits.body.totalPoints, 17, '2 -> 9 override, plus 3 and 5');
+    assert.equal(afterEdits.body.requiredPoints, 8, 'the overridden item is now optional');
+    assert.deepEqual(afterEdits.body.publishBlockers, []);
+
+    const detached = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'detach_question', assessmentId: exam.body.id, questionId: ids[1] } });
+    assert.equal(detached.response.status, 200, JSON.stringify(detached.body));
+    const afterDetach = await call(`/api/assessments/${exam.body.id}`, { session: author });
+    assert.equal(afterDetach.body.items.length, 2);
+    // Positions must close up: the player's navigation and the marking queue's
+    // ordering both read `position` as "nth question".
+    assert.deepEqual(afterDetach.body.items.map((item) => item.position), [1, 2]);
+
+    const published = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'publish', assessmentId: exam.body.id } });
+    assert.equal(published.response.status, 200, JSON.stringify(published.body));
+
+    // A published assessment is frozen until it is returned to draft.
+    const frozen = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'set_item', assessmentId: exam.body.id, questionId: ids[0], required: true } });
+    assert.equal(frozen.response.status, 409, JSON.stringify(frozen.body));
+    assert.match(frozen.body.error, /draft/i);
+
+    const unpublished = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'unpublish', assessmentId: exam.body.id } });
+    assert.equal(unpublished.response.status, 200, JSON.stringify(unpublished.body));
+    assert.equal(unpublished.body.status, 'draft');
+  });
+
+  test('an exam an author does not administer cannot be edited', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+    // A syntactically valid uuid that belongs to nobody must 404, not 500 and
+    // not leak whether it exists in another tenant.
+    const missing = await call(`/api/assessments/00000000-0000-4000-8000-00000000dead`, { session: world.analyst });
+    assert.equal(missing.response.status, 404, JSON.stringify(missing.body));
+
+    const learnerView = await call(`/api/assessments/00000000-0000-4000-8000-00000000dead`, { session: world.learner });
+    assert.equal(learnerView.response.status, 403, 'the authoring detail view is author-only');
+  });
+
   test('an author cannot reach another tenant, and a learner cannot reach another learner', async (t) => {
     if (!world.postgres) return t.skip(skipReason);
 
