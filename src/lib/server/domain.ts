@@ -170,6 +170,27 @@ export type Course = {
   version: number;
   status: "draft" | "published" | "retired";
   createdAt: string;
+  /**
+   * Who may FIND this course, which is a separate question from who may be
+   * enrolled on it. 'organization' is the rule the rest of the product already
+   * uses for delivery (owned at or above the viewer's org); 'tenant' widens it
+   * to everyone in the tenant; 'listed' additionally marks the course as
+   * offered for discovery. See `visibilityPredicate` in catalog.ts — 'listed'
+   * is NOT cross-tenant, and cannot be until somebody decides it should be.
+   */
+  visibility: "organization" | "tenant" | "listed";
+  /** Short catalogue blurb. `description` is the syllabus and is far too long for a card. */
+  summary: string;
+  instructorUserId: Id | null;
+  /**
+   * A DISPLAYED asking price, in minor units. Nothing in this system can take
+   * money: there is no order, no ledger, no payout and no charge. Rendering a
+   * Buy control against this field would be a lie about what happens next.
+   */
+  listPriceCents: number | null;
+  /** ISO-4217, upper case. Null exactly when `listPriceCents` is null — the
+   *  schema's `courses_price_needs_currency` CHECK refuses any other pairing. */
+  currency: string | null;
 };
 
 export type CourseModule = {

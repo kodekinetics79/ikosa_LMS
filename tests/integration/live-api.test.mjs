@@ -834,6 +834,94 @@ describe('assessment engine', () => {
     assert.equal(completed.score, null);
   });
 
+  test('the catalogue ranks by real enrolment and never crosses a tenant', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const mine = await call('/api/catalog?sort=popular', { session: world.admin });
+    assert.equal(mine.response.status, 200, JSON.stringify(mine.body));
+    // An administrator at the root organization saw an EMPTY catalogue when the
+    // visibility rule was only the delivery test: every seeded course is owned
+    // one level down, and `ou.path @> viewer` asks whether the course sits at or
+    // ABOVE the reader. A person cannot be shown nothing on the screen that
+    // lists their own courses.
+    assert.ok(mine.body.items.length >= 1, 'a tenant administrator sees their own catalogue');
+    // "Hot courses" is a real aggregate over enrolments, not a stored counter.
+    const counts = mine.body.items.map((item) => item.enrollmentCount);
+    assert.deepEqual(counts, [...counts].sort((a, b) => b - a), 'popular sort is descending by enrolment');
+    for (const item of mine.body.items) {
+      // null, not 0, when nobody has enrolled: "0% complete" on a brand-new
+      // course reads as "people fail this", which is a claim the data does not
+      // support.
+      assert.ok(item.completionRate === null || typeof item.completionRate === 'number');
+      if (item.enrollmentCount === 0) assert.equal(item.completionRate, null);
+      assert.ok(item.enrollmentCount >= item.completionCount);
+    }
+
+    const theirs = await call('/api/catalog?sort=popular', { session: world.gulfAdmin });
+    assert.equal(theirs.response.status, 200);
+    const mineIds = new Set(mine.body.items.map((item) => item.id));
+    assert.equal(theirs.body.items.some((item) => mineIds.has(item.id)), false, 'no course crosses the tenant boundary');
+
+    // Course tracking is author-only and scope-checked.
+    const tracked = await call(`/api/catalog?courseId=${mine.body.items[0].id}`, { session: world.admin });
+    assert.equal(tracked.response.status, 200, JSON.stringify(tracked.body));
+    const learnerTracking = await call(`/api/catalog?courseId=${mine.body.items[0].id}`, { session: world.learner });
+    assert.ok([403, 404].includes(learnerTracking.response.status), 'a learner cannot read course tracking');
+    const foreignTracking = await call(`/api/catalog?courseId=${mine.body.items[0].id}`, { session: world.gulfAdmin });
+    assert.ok([403, 404].includes(foreignTracking.response.status), 'another tenant cannot read course tracking');
+  });
+
+  test('a scheduled session records attendance, bounded and tenant-scoped', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const starts = new Date(Date.now() + 86_400_000).toISOString();
+    const ends = new Date(Date.now() + 86_400_000 + 3_600_000).toISOString();
+    const session = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: `Briefing ${Date.now()}`, description: 'Field briefing', startsAt: starts, endsAt: ends, timeZone: 'America/New_York', capacity: 20 }
+    });
+    assert.equal(session.response.status, 201, JSON.stringify(session.body));
+    assert.equal(session.body.provider, 'manual', 'no video provider is integrated, and nothing may claim one');
+
+    // A session that ends before it starts is a data-entry error. The schema
+    // refuses it; the API must say so rather than surface a constraint 500.
+    const backwards = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: 'Backwards', description: '', startsAt: ends, endsAt: starts, timeZone: 'UTC' }
+    });
+    assert.equal(backwards.response.status, 400, JSON.stringify(backwards.body));
+
+    const registered = await call('/api/session-attendance', {
+      session: world.admin, method: 'POST', body: { action: 'register', sessionId: session.body.id, userIds: [world.learner.user.id] }
+    });
+    assert.equal(registered.response.status, 200, JSON.stringify(registered.body));
+
+    const recorded = await call('/api/session-attendance', {
+      session: world.admin, method: 'PATCH',
+      body: { action: 'record', sessionId: session.body.id, entries: [{ subjectUserId: world.learner.user.id, status: 'attended', minutesAttended: 600, note: 'Typo: ten hours on a one-hour session' }] }
+    });
+    assert.equal(recorded.response.status, 200, JSON.stringify(recorded.body));
+
+    const roster = await call(`/api/live-sessions?sessionId=${session.body.id}`, { session: world.admin });
+    assert.equal(roster.response.status, 200);
+    const row = roster.body.roster.find((entry) => entry.subjectUserId === world.learner.user.id);
+    assert.ok(row, 'the registered learner is on the roster');
+    assert.equal(row.status, 'attended');
+    // 600 minutes on a 60-minute session is a typo, not a fact.
+    assert.ok(row.minutesAttended <= 61, `minutes were capped at the session length, got ${row.minutesAttended}`);
+    assert.ok(row.recordedAt, 'an attendance observation names when it was made');
+
+    // A learner sees the session they are delivered, and no roster.
+    const learnerView = await call('/api/live-sessions', { session: world.learner });
+    assert.equal(learnerView.response.status, 200);
+
+    // Another tenant sees neither the session nor its roster.
+    const foreign = await call('/api/live-sessions', { session: world.gulfAdmin });
+    assert.equal(foreign.body.items.some((item) => item.id === session.body.id), false);
+    const foreignRoster = await call(`/api/live-sessions?sessionId=${session.body.id}`, { session: world.gulfAdmin });
+    assert.ok([403, 404].includes(foreignRoster.response.status), 'another tenant cannot open the roster');
+  });
+
   test('an author cannot reach another tenant, and a learner cannot reach another learner', async (t) => {
     if (!world.postgres) return t.skip(skipReason);
 

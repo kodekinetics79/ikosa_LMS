@@ -26,4 +26,5 @@ export const Icons = {
   learning: (p: IconProps) => <Icon {...p}><path d="M4 5h6a3 3 0 0 1 3 3v11a2.5 2.5 0 0 0-2.5-2.5H4Zm16 0h-6a3 3 0 0 0-3 3v11a2.5 2.5 0 0 1 2.5-2.5H20Z" /></Icon>,
   catalog: (p: IconProps) => <Icon {...p}><path d="M4 6h7v5H4zM13 6h7v5h-7zM4 13h7v5H4zM13 13h7v5h-7z" /></Icon>,
   info: (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01" /></Icon>,
+  session: (p: IconProps) => <Icon {...p}><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3z" /></Icon>,
 };

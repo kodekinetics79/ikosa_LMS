@@ -16,6 +16,7 @@ export const product = {
 export const primaryNavigation = [
   { href: "/workspace", label: "Workspace home", icon: "home" },
   { href: "/learning", label: "My learning", icon: "learning" },
+  { href: "/sessions", label: "Live sessions", icon: "session" },
   { href: "/assessments", label: "Assessments", icon: "assessment" },
   { href: "/catalog", label: "Catalogue", icon: "catalog" },
   { href: "/signals", label: "Signal inbox", icon: "signal" },
