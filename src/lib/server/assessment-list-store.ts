@@ -152,6 +152,26 @@ export async function listMarkingQueue(principal: Principal): Promise<MarkingQue
   const roots = pathsToLtree(scope.orgScopes);
   return withTenantTransaction(await pool(), scope, async (client) => {
     const { rows } = await client.query(
+      // MARKING AUTHORITY FOLLOWS THE LEARNER, NOT THE ASSESSMENT.
+      //
+      // The queue previously scoped on the ASSESSMENT's organization
+      // (`ou.path <@ ANY(roots)`). Assessments are authored centrally and
+      // delivered down the tree, so an assessor delegated to a region could not
+      // see a single response from their own learners on any exam owned above
+      // them — which is the normal shape of every corporate and academic
+      // deployment. The marking queue was empty for exactly the people who do
+      // the marking.
+      //
+      // The subject's organization is also the right boundary on the merits: a
+      // marked response becomes competence evidence about that learner, and
+      // `evidence` is already scoped by the subject's org everywhere else in
+      // this product. Two rules for "whose record is this" is how a compliance
+      // system starts telling two stories.
+      //
+      // The assessment must still be one the marker can legitimately see, using
+      // the same visibility rule delivery uses: owned at or below their roots,
+      // or an ancestor of their own organization. Tenant isolation is unchanged
+      // and is enforced by RLS regardless of this predicate.
       `SELECT r.id AS response_id,r.attempt_id,x.assessment_id,a.code AS assessment_code,a.title AS assessment_title,
               x.subject_user_id,u.display_name AS learner_name,u.email::text AS learner_email,
               r.question_id,q.question_type,q.prompt,r.response,q.answer_key,q.rationale,
@@ -161,13 +181,15 @@ export async function listMarkingQueue(principal: Principal): Promise<MarkingQue
          JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
          JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
          JOIN osa.users u ON u.tenant_id=x.tenant_id AND u.id=x.subject_user_id
+         JOIN osa.org_units lou ON lou.tenant_id=u.tenant_id AND lou.id=u.org_unit_id
          JOIN osa.assessment_questions q ON q.tenant_id=r.tenant_id AND q.id=r.question_id
          JOIN osa.assessment_items i ON i.tenant_id=x.tenant_id AND i.assessment_id=x.assessment_id AND i.question_id=r.question_id
         WHERE x.status='submitted'
           AND r.final_score IS NULL
-          AND ou.path <@ ANY($1::ltree[])
+          AND lou.path <@ ANY($1::ltree[])
+          AND (ou.path <@ ANY($1::ltree[]) OR ou.path @> $2::ltree)
         ORDER BY x.submitted_at,a.title,u.display_name,i.position`,
-      [roots],
+      [roots, pathToLtree(scope.viewerOrgPath)],
     );
     return rows.map((row) => ({
       responseId: String(row.response_id), attemptId: String(row.attempt_id), assessmentId: String(row.assessment_id),

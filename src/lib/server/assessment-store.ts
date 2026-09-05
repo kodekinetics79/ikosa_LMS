@@ -353,13 +353,22 @@ export async function gradeAssessmentResponse(principal:Principal,responseId:str
   return write(principal,async(client)=>{
     const scope=scopeForPrincipal(principal); const {roots}=scopePaths(principal);
     const response=await client.query(
+      // The SAME authority rule the marking queue uses: the learner must be in
+      // the marker's delegated scope, and the assessment must be one they can
+      // see. If these two ever diverge, the queue lists work that grading then
+      // refuses — a queue item nobody can clear.
       `SELECT r.id,r.attempt_id,r.question_id,coalesce(i.points_override,q.points)::float8 AS max_points,x.assessment_id
        FROM osa.assessment_responses r JOIN osa.assessment_attempts x ON x.tenant_id=r.tenant_id AND x.id=r.attempt_id
        JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
        JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
+       JOIN osa.users u ON u.tenant_id=x.tenant_id AND u.id=x.subject_user_id
+       JOIN osa.org_units lou ON lou.tenant_id=u.tenant_id AND lou.id=u.org_unit_id
        JOIN osa.assessment_items i ON i.tenant_id=x.tenant_id AND i.assessment_id=x.assessment_id AND i.question_id=r.question_id
        JOIN osa.assessment_questions q ON q.tenant_id=r.tenant_id AND q.id=r.question_id
-       WHERE r.id=$1::uuid AND x.status='submitted' AND ou.path <@ ANY($2::ltree[]) FOR UPDATE OF r`,[responseId,roots]);
+       WHERE r.id=$1::uuid AND x.status='submitted'
+         AND lou.path <@ ANY($2::ltree[])
+         AND (ou.path <@ ANY($2::ltree[]) OR ou.path @> $3::ltree)
+       FOR UPDATE OF r`,[responseId,roots,scopePaths(principal).viewer]);
     const row=response.rows[0]; if(!row)throw notFound("Response is not available for marking");
     const maxPoints=num(row.max_points); if(!Number.isFinite(score)||score<0||score>maxPoints)throw outOfRange(`Score must be between 0 and ${maxPoints}`);
     await client.query(`UPDATE osa.assessment_responses SET manual_score=$2,final_score=$2,feedback=$3,graded_by=$4::uuid,graded_at=now() WHERE id=$1::uuid`,[responseId,score,feedback,scope.userId]);
@@ -379,7 +388,7 @@ export async function gradeAssessmentResponse(principal:Principal,responseId:str
        WHERE i.assessment_id=$2::uuid`,[row.attempt_id,row.assessment_id]);
     const assessment=await client.query<{pass_percentage:number}>(`SELECT pass_percentage::float8 AS pass_percentage FROM osa.assessments WHERE id=$1::uuid`,[row.assessment_id]);
     const earned=num(totals.rows[0].earned),max=num(totals.rows[0].max),pct=percentage(earned,max);
-    const updated=await client.query(`UPDATE osa.assessment_attempts SET status='graded',graded_at=now(),grader_user_id=$2::uuid,score_points=$3,max_points=$4,percentage=$5,passed=$5 >= $6 WHERE id=$1::uuid RETURNING *`,[row.attempt_id,scope.userId,earned,max,pct,num(assessment.rows[0].pass_percentage)]);
+    const updated=await client.query(`UPDATE osa.assessment_attempts SET status='graded',graded_at=now(),grader_user_id=$2::uuid,score_points=$3::numeric,max_points=$4::numeric,percentage=$5::numeric,passed=$5::numeric >= $6::numeric WHERE id=$1::uuid RETURNING *`,[row.attempt_id,scope.userId,earned,max,pct,num(assessment.rows[0].pass_percentage)]);
     await appendAudit(client,principal,requestId,"assessment.response.grade","assessment_response",responseId,{score,maxPoints,finalized:true,attemptId:String(row.attempt_id),percentage:pct});
     return toAttempt(updated.rows[0]);
   });
