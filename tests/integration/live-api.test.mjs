@@ -545,6 +545,15 @@ describe('assessment engine', () => {
     assert.equal(frozen.response.status, 409, JSON.stringify(frozen.body));
     assert.match(frozen.body.error, /draft/i);
 
+    // Publishing what is already published must say so. The publish query used
+    // to filter on `status='draft'`, which made an already-published assessment
+    // indistinguishable from one in another organization: both came back as
+    // "Draft assessment not found in your scope", telling the legitimate owner
+    // they could not see their own live exam.
+    const republish = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'publish', assessmentId: exam.body.id } });
+    assert.equal(republish.response.status, 409, JSON.stringify(republish.body));
+    assert.match(republish.body.error, /already published/i);
+
     const unpublished = await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'unpublish', assessmentId: exam.body.id } });
     assert.equal(unpublished.response.status, 200, JSON.stringify(unpublished.body));
     assert.equal(unpublished.body.status, 'draft');

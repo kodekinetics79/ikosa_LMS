@@ -274,17 +274,25 @@ export async function publishAssessment(principal:Principal,assessmentId:string,
   requireAuthor(principal);
   await write(principal,async(client)=>{
     const {roots}=scopePaths(principal);
+    // `status` is SELECTED, not filtered on. Requiring `a.status='draft'` in the
+    // predicate made an already-published assessment indistinguishable from one
+    // in another organization: both returned no row and both were reported as
+    // "Draft assessment not found in your scope" — telling the legitimate owner
+    // they could not see their own assessment when in fact it was already live.
+    // Existence and scope are one question; lifecycle state is another.
     const result=await client.query(
-      `SELECT a.id,
+      `SELECT a.id, a.status,
               count(i.question_id)::int AS items,
               count(i.question_id) FILTER (WHERE q.review_status<>'approved')::int AS unapproved
          FROM osa.assessments a
          JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
          LEFT JOIN osa.assessment_items i ON i.tenant_id=a.tenant_id AND i.assessment_id=a.id
          LEFT JOIN osa.assessment_questions q ON q.tenant_id=i.tenant_id AND q.id=i.question_id
-        WHERE a.id=$1::uuid AND a.status='draft' AND ou.path <@ ANY($2::ltree[])
-        GROUP BY a.id`,[assessmentId,roots]);
-    const row=result.rows[0]; if(!row)throw notFound("Draft assessment not found in your scope");
+        WHERE a.id=$1::uuid AND ou.path <@ ANY($2::ltree[])
+        GROUP BY a.id, a.status`,[assessmentId,roots]);
+    const row=result.rows[0]; if(!row)throw notFound("Assessment not found in your scope");
+    if(String(row.status)==="published")throw conflict("This assessment is already published");
+    if(String(row.status)!=="draft")throw conflict(`A ${String(row.status)} assessment cannot be published. Return it to draft first.`);
     if(num(row.items)<1)throw conflict("Add at least one question before publishing");
     if(num(row.unapproved)>0)throw conflict("Every assessment question must be approved before publishing");
     await client.query(`UPDATE osa.assessments SET status='published',updated_at=now() WHERE id=$1::uuid`,[assessmentId]);
