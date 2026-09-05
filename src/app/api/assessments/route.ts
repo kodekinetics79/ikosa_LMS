@@ -1,5 +1,9 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import { addQuestionToAssessment, createAssessment, publishAssessment } from "@/lib/server/assessment-store";
+import {
+  detachQuestion, reorderQuestions, setAssessmentLifecycle, setItemSettings,
+  updateAssessmentSettings, type AssessmentSettings,
+} from "@/lib/server/assessment/authoring";
 import { listAssessmentWorkspace } from "@/lib/server/assessment-list-store";
 import { json, objectBody, optionalEnum, problem, requestId, requiredString, ValidationError } from "@/lib/server/http";
 
@@ -77,6 +81,73 @@ export async function PATCH(request: Request): Promise<Response> {
     if (action === "publish") {
       await publishAssessment(principal, assessmentId, rid);
       return json({ ok: true, assessmentId, action });
+    }
+    if (action === "detach_question") {
+      await detachQuestion(principal, assessmentId, requiredString(body, "questionId", 100), rid);
+      return json({ ok: true, assessmentId, action });
+    }
+    if (action === "reorder_questions") {
+      const questionIds = Array.isArray(body.questionIds) ? body.questionIds.filter((value): value is string => typeof value === "string") : null;
+      if (!questionIds || questionIds.length === 0) throw new ValidationError("Validation failed", { questionIds: "Provide every question id in the new order" });
+      await reorderQuestions(principal, assessmentId, questionIds, rid);
+      return json({ ok: true, assessmentId, action });
+    }
+    if (action === "set_item") {
+      // `undefined` and `null` mean different things here: absent leaves the
+      // column alone, null clears the override back to the question's own
+      // points. Distinguishing them is why this is not a spread of the body.
+      const settings: { pointsOverride?: number | null; required?: boolean } = {};
+      if ("pointsOverride" in body) {
+        const raw = body.pointsOverride;
+        if (raw === null || raw === "") settings.pointsOverride = null;
+        else {
+          const value = Number(raw);
+          if (!Number.isFinite(value)) throw new ValidationError("Validation failed", { pointsOverride: "Must be a number, or null to clear it" });
+          settings.pointsOverride = value;
+        }
+      }
+      if ("required" in body) {
+        if (typeof body.required !== "boolean") throw new ValidationError("Validation failed", { required: "Must be true or false" });
+        settings.required = body.required;
+      }
+      if (Object.keys(settings).length === 0) throw new ValidationError("Validation failed", { body: "Provide pointsOverride, required, or both" });
+      await setItemSettings(principal, assessmentId, requiredString(body, "questionId", 100), settings, rid);
+      return json({ ok: true, assessmentId, action });
+    }
+    if (action === "update") {
+      const settings: AssessmentSettings = {};
+      if ("title" in body) settings.title = requiredString(body, "title", 240);
+      if ("description" in body) settings.description = typeof body.description === "string" ? body.description.trim().slice(0, 4000) : "";
+      if ("assessmentType" in body) settings.assessmentType = optionalEnum(body, "assessmentType", ["quiz","exam","practice"] as const, "quiz");
+      if ("durationMinutes" in body) {
+        const raw = body.durationMinutes;
+        if (raw === null || raw === "") settings.durationMinutes = null;
+        else {
+          const value = Number(raw);
+          if (!Number.isInteger(value) || value <= 0 || value > 1440) throw new ValidationError("Validation failed", { durationMinutes: "Duration must be 1-1440 minutes" });
+          settings.durationMinutes = value;
+        }
+      }
+      if ("passPercentage" in body) {
+        const value = Number(body.passPercentage);
+        if (!Number.isFinite(value) || value < 0 || value > 100) throw new ValidationError("Validation failed", { passPercentage: "Pass percentage must be 0-100" });
+        settings.passPercentage = value;
+      }
+      if ("attemptLimit" in body) {
+        const value = Number(body.attemptLimit);
+        if (!Number.isInteger(value) || value < 1 || value > 100) throw new ValidationError("Validation failed", { attemptLimit: "Attempt limit must be 1-100" });
+        settings.attemptLimit = value;
+      }
+      if ("shuffleQuestions" in body) settings.shuffleQuestions = body.shuffleQuestions === true;
+      if ("shuffleOptions" in body) settings.shuffleOptions = body.shuffleOptions === true;
+      if ("feedbackMode" in body) settings.feedbackMode = optionalEnum(body, "feedbackMode", ["immediate","after_submit","after_close"] as const, "after_submit");
+      if ("opensAt" in body) settings.opensAt = optionalDate(body.opensAt, "opensAt");
+      if ("closesAt" in body) settings.closesAt = optionalDate(body.closesAt, "closesAt");
+      if (Object.keys(settings).length === 0) throw new ValidationError("Validation failed", { body: "Provide at least one field to change" });
+      return json(await updateAssessmentSettings(principal, assessmentId, settings, rid));
+    }
+    if (action === "unpublish" || action === "retire") {
+      return json(await setAssessmentLifecycle(principal, assessmentId, action === "unpublish" ? "draft" : "retired", rid));
     }
     throw new ValidationError("Validation failed", { action: "Unsupported assessment action" });
   } catch (error) { return problem(error, rid); }

@@ -1,6 +1,7 @@
 import { AuthError, assertCsrf, principalFromRequest } from "@/lib/server/auth";
 import { createQuestionBank, listQuestionBanks } from "@/lib/server/assessment-store";
-import { json, objectBody, problem, requestId, requiredString } from "@/lib/server/http";
+import { setBankStatus } from "@/lib/server/assessment/authoring";
+import { json, objectBody, optionalEnum, problem, requestId, requiredString } from "@/lib/server/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,5 +34,21 @@ export async function POST(request: Request): Promise<Response> {
       requestId: rid,
     });
     return json(bank, { status: 201 });
+  } catch (error) { return problem(error, rid); }
+}
+
+/**
+ * Retires or reactivates a bank. `createAssessmentQuestion` already refused to
+ * add a question to a retired bank, so the guard existed while nothing could
+ * ever set the status it guarded against.
+ */
+export async function PATCH(request: Request): Promise<Response> {
+  const rid = requestId(request);
+  try {
+    const principal = await principalFromRequest(request);
+    assertCsrf(request, principal);
+    const body = await objectBody(request);
+    const status = optionalEnum(body, "status", ["active","retired"] as const, "retired");
+    return json(await setBankStatus(principal, requiredString(body, "bankId", 100), status, rid));
   } catch (error) { return problem(error, rid); }
 }
