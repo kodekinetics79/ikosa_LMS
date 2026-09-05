@@ -28,6 +28,10 @@ if [[ ! -f .next/standalone/server.js ]]; then
   exit 1
 fi
 
+# `next build` does not copy .next/static into the standalone tree. Without it
+# every page serves with no stylesheet and no client JavaScript.
+./scripts/assemble-standalone.sh >/dev/null
+
 port="${IK_INTEGRATION_PORT:-3000}"
 base_url="http://127.0.0.1:${port}"
 work_dir="$(mktemp -d /tmp/ik-osa-integration.XXXXXX)"

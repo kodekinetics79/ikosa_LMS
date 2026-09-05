@@ -98,6 +98,10 @@ jobs:
 
       - name: Start the application against PostgreSQL
         run: |
+          # npm run build already assembles the bundle; assert it rather than
+          # assume it, because a page served without its static chunks looks
+          # like a product bug for the rest of the job.
+          test -d .next/standalone/.next/static || { echo "standalone bundle has no static assets" >&2; exit 1; }
           # Test-only secrets, generated per run and never leaving the runner.
           # The bundle boots with the same requirements a deployment has rather
           # than with those requirements relaxed.
