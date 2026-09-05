@@ -512,7 +512,11 @@ test("every raised notification carries the fields the interface and the audit t
   });
 
   for (const row of rows) {
-    assert.ok(row.id.startsWith("ntf_"), "identifiers follow the datastore's prefix convention");
+    // A uuid, not the old `ntf_<hex>` form. Every id column in the schema is
+    // `uuid`, and minting anything else meant the API returned an identifier
+    // that PostgreSQL then stored under a different, derived one. See
+    // src/lib/server/security.ts::id().
+    assert.match(row.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "identifiers are uuids the schema can store unchanged");
     assert.ok(row.title.length > 0 && row.body.length > 0);
     assert.ok(row.dedupeKey.startsWith(`${row.kind}:`), "the key must name the condition it identifies");
     assert.ok(row.dedupeKey.includes(row.resourceId), "the key must name the record the condition came from");
