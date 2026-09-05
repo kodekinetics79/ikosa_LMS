@@ -77,9 +77,15 @@ export function AssessmentAttemptClient({ assessmentId, csrfToken }: { assessmen
       const initial: AnswerMap = {};
       for (const item of payload.responses) initial[item.questionId] = item.response;
       setAnswers(initial);
-      if (payload.assessment.durationMinutes) {
-        const elapsed = Math.floor((Date.now() - Date.parse(payload.attempt.startedAt)) / 1000);
-        setSecondsLeft(Math.max(0, payload.assessment.durationMinutes * 60 - elapsed));
+      // Seed the countdown from the SERVER's deadline and the SERVER's clock,
+      // then tick locally. Measuring `Date.now()` against `startedAt` gave a
+      // learner whose device clock was wrong - or set back deliberately - a
+      // different amount of time than the exam allowed. Only the difference
+      // between two server timestamps is trusted here; the browser contributes
+      // the ticking, not the budget.
+      if (payload.deadlineAt) {
+        const remaining = Math.floor((Date.parse(payload.deadlineAt) - Date.parse(payload.serverNow)) / 1000);
+        setSecondsLeft(Math.max(0, remaining));
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start assessment"); }
     finally { setLoading(false); }
@@ -143,11 +149,11 @@ export function AssessmentAttemptClient({ assessmentId, csrfToken }: { assessmen
   }
 
   return <div className={styles.player}>
-    <header className={styles.playerHeader}><div><Link href="/assessments">← Assessments</Link><span>{workspace.assessment.code}</span><h1>{workspace.assessment.title}</h1></div><div className={styles.headerStats}><span><small>Progress</small><strong>{answeredCount}/{workspace.questions.length}</strong></span>{secondsLeft !== null ? <span className={secondsLeft < 300 ? styles.timeUrgent : ""}><small>Time left</small><strong>{formatTime(secondsLeft)}</strong></span> : null}</div></header>
+    <header className={styles.playerHeader}><div><Link href="/assessments">← Assessments</Link><span>{workspace.assessment.code}</span><h1>{workspace.assessment.title}</h1></div><div className={styles.headerStats}><span><small>Progress</small><strong>{answeredCount}/{workspace.questions.length}</strong></span>{secondsLeft !== null ? <span className={secondsLeft < 300 ? styles.timeUrgent : ""} role="timer" aria-live={secondsLeft <= 60 ? "assertive" : "off"} aria-label={`Time remaining ${formatTime(secondsLeft)}`}><small>Time left</small><strong>{formatTime(secondsLeft)}</strong></span> : null}</div></header>
     {error ? <div className={styles.error} role="alert">{error}<button onClick={() => setError("")} type="button">×</button></div> : null}
     <div className={styles.playerGrid}>
       <aside className={styles.questionNav}><div className={styles.navTitle}>Questions <span>{Math.round((answeredCount / Math.max(1,workspace.questions.length))*100)}%</span></div><div className={styles.questionButtons}>{workspace.questions.map((item,index) => <button type="button" key={item.id} className={`${index === current ? styles.currentQuestion : ""} ${answered(item.questionType, answers[item.id]) ? styles.answeredQuestion : ""}`} onClick={() => setCurrent(index)}><span>{index+1}</span><small>{answered(item.questionType, answers[item.id]) ? "Answered" : item.required ? "Required" : "Optional"}</small></button>)}</div><div className={styles.navFooter}><span>Autosave</span><strong>{saving && saving !== "submit" ? "Saving…" : "Up to date"}</strong></div></aside>
-      <main className={styles.questionCanvas}>{question ? <QuestionEditor question={question} value={answers[question.id]} onChange={(value) => save(question.id,value)} disabled={secondsLeft === 0}/>:null}<footer className={styles.canvasFooter}><button type="button" className={styles.secondaryButton} disabled={current===0} onClick={() => setCurrent((value)=>Math.max(0,value-1))}>Previous</button><div>{current < workspace.questions.length-1 ? <button type="button" className={styles.primaryButton} onClick={() => setCurrent((value)=>Math.min(workspace.questions.length-1,value+1))}>Next question</button> : <button type="button" className={styles.submitButton} disabled={saving==="submit"} onClick={() => submit(false)}>{saving==="submit"?"Submitting…":"Submit assessment"}</button>}</div></footer></main>
+      <main className={styles.questionCanvas}>{question ? <QuestionEditor key={question.id} question={question} value={answers[question.id]} onChange={(value) => save(question.id,value)} disabled={secondsLeft === 0}/>:null}<footer className={styles.canvasFooter}><button type="button" className={styles.secondaryButton} disabled={current===0} onClick={() => setCurrent((value)=>Math.max(0,value-1))}>Previous</button><div>{current < workspace.questions.length-1 ? <button type="button" className={styles.primaryButton} onClick={() => setCurrent((value)=>Math.min(workspace.questions.length-1,value+1))}>Next question</button> : <button type="button" className={styles.submitButton} disabled={saving==="submit"} onClick={() => submit(false)}>{saving==="submit"?"Submitting…":"Submit assessment"}</button>}</div></footer></main>
     </div>
   </div>;
 }

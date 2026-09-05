@@ -57,7 +57,7 @@ function toScoringQuestion(row: Record<string, unknown>): AssessmentQuestion {
   };
 }
 
-async function appendAudit(client: PoolClient, principal: Principal, requestId: string, attemptId: string, assessmentId: string, earned: number, max: number, manualRequired: boolean): Promise<void> {
+async function appendAudit(client: PoolClient, principal: Principal, requestId: string, attemptId: string, assessmentId: string, earned: number, max: number, manualRequired: boolean, afterDeadline: boolean): Promise<void> {
   const scope = scopeForPrincipal(principal);
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`osa.audit:${scope.tenantId}`]);
   const { rows } = await client.query(`SELECT a.id,a.tenant_id,a.actor_user_id,a.action,a.resource_type,a.resource_id,a.outcome,a.occurred_at,a.request_id,a.metadata,a.previous_hash,a.event_hash FROM osa.audit_events a ORDER BY a.sequence DESC LIMIT 1`);
@@ -69,7 +69,9 @@ async function appendAudit(client: PoolClient, principal: Principal, requestId: 
     resourceId: attemptId,
     outcome: "success",
     requestId,
-    metadata: { assessmentId, manualRequired, objectiveScore: earned, maxPoints: max },
+    // `afterDeadline` records that the required-question gate was waived, so a
+    // submission with blanks is explainable from the ledger alone.
+    metadata: { assessmentId, manualRequired, objectiveScore: earned, maxPoints: max, afterDeadline },
   });
   await client.query(
     `INSERT INTO osa.audit_events (id,tenant_id,actor_user_id,action,resource_type,resource_id,outcome,request_id,metadata,occurred_at,previous_hash,event_hash)
@@ -93,7 +95,19 @@ export async function submitAssessmentAttemptSafely(
 
   return withTenantTransaction(await pool(), scope, async (client) => {
     const attemptRows = await client.query(
-      `SELECT x.*, a.pass_percentage::float8 AS pass_percentage
+      // The deadline is computed by the DATABASE, from the stored start time and
+      // the stored duration, against the database clock. The player's countdown
+      // is a convenience; it is not evidence of anything. `least(...)` ignores
+      // nulls, so an untimed assessment inside an open window has no deadline,
+      // and an assessment with both a duration and a closing time is bounded by
+      // whichever arrives first.
+      `SELECT x.*, a.pass_percentage::float8 AS pass_percentage,
+              least(
+                CASE WHEN a.duration_minutes IS NULL THEN NULL
+                     ELSE x.started_at + make_interval(mins => a.duration_minutes) END,
+                a.closes_at
+              ) AS deadline_at,
+              now() AS server_now
          FROM osa.assessment_attempts x
          JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
         WHERE x.id=$1::uuid AND x.subject_user_id=$2::uuid AND x.status='in_progress'
@@ -124,8 +138,22 @@ export async function submitAssessmentAttemptSafely(
       [attemptId],
     );
     const byQuestion = new Map(responseRows.rows.map((row) => [row.question_id, row]));
+    // Has the window closed, according to the database?
+    const deadlineAt = attemptRow.deadline_at ? new Date(attemptRow.deadline_at as string | Date) : null;
+    const serverNow = new Date(attemptRow.server_now as string | Date);
+    const expired = deadlineAt !== null && deadlineAt.getTime() <= serverNow.getTime();
+
     const missing = items.filter((item) => bool(item.required) && !byQuestion.has(String(item.question_id)));
-    if (missing.length) throw conflict(`${missing.length} required question${missing.length === 1 ? " is" : "s are"} unanswered`);
+    if (missing.length && !expired) {
+      throw conflict(`${missing.length} required question${missing.length === 1 ? " is" : "s are"} unanswered`);
+    }
+    // Past the deadline the gate must NOT apply. `saveTimedAssessmentResponse`
+    // already refuses every write once the window has closed, so an expired
+    // attempt with a blank required question cannot be completed by any means:
+    // refusing the submission too left the attempt `in_progress` forever, and
+    // migration 006's partial unique index then made it impossible to start
+    // another attempt at that assessment. Blocking a learner out of their own
+    // exam is a worse outcome than grading a blank as a blank.
 
     let earned = 0;
     let max = 0;
@@ -166,7 +194,7 @@ export async function submitAssessmentAttemptSafely(
       [attemptId, fullyGraded ? "graded" : "submitted", fullyGraded, earned, max, pct, num(attemptRow.pass_percentage)],
     );
 
-    await appendAudit(client, principal, requestId, attemptId, attempt.assessmentId, earned, max, manualRequired);
+    await appendAudit(client, principal, requestId, attemptId, attempt.assessmentId, earned, max, manualRequired, expired);
     return toAttempt(updated[0]);
   });
 }

@@ -35,6 +35,16 @@ export type LearnerQuestion = {
 
 export type AttemptWorkspace = {
   attempt: AssessmentAttempt;
+  /**
+   * The instant the database will stop accepting answers: the earlier of
+   * `started_at + duration_minutes` and the assessment's `closes_at`, or null
+   * when the assessment is untimed and has no closing time. Rendered by the
+   * player together with `serverNow` so the countdown is a view of the server's
+   * clock rather than of the learner's.
+   */
+  deadlineAt: string | null;
+  /** The database's clock at the moment this payload was built. */
+  serverNow: string;
   assessment: Pick<Assessment, "id" | "code" | "title" | "assessmentType" | "durationMinutes" | "passPercentage" | "feedbackMode">;
   questions: LearnerQuestion[];
   responses: Array<{ questionId: string; response: unknown; finalScore: number | null; feedback: string }>;
@@ -284,7 +294,19 @@ export async function publishAssessment(principal:Principal,assessmentId:string,
 async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,attemptId:string):Promise<AttemptWorkspace>{
   const {viewer}=scopePaths(principal); const scope=scopeForPrincipal(principal);
   const {rows}=await client.query(
-    `SELECT x.*,a.code,a.title,a.assessment_type,a.duration_minutes,a.pass_percentage,a.feedback_mode
+    // `deadline_at` and `server_now` come from the database, not the browser.
+    // The player used to compute its countdown from `Date.now()` against
+    // `startedAt`, so a learner whose clock was wrong - or deliberately set
+    // back - got a different amount of time than the exam allowed. The server
+    // is the only clock that decides when an attempt is over; the countdown is
+    // rendered from these two values and is now only a display of it.
+    `SELECT x.*,a.code,a.title,a.assessment_type,a.duration_minutes,a.pass_percentage,a.feedback_mode,
+            least(
+              CASE WHEN a.duration_minutes IS NULL THEN NULL
+                   ELSE x.started_at + make_interval(mins => a.duration_minutes) END,
+              a.closes_at
+            ) AS deadline_at,
+            now() AS server_now
        FROM osa.assessment_attempts x JOIN osa.assessments a ON a.tenant_id=x.tenant_id AND a.id=x.assessment_id
        JOIN osa.org_units ou ON ou.tenant_id=a.tenant_id AND ou.id=a.org_unit_id
       WHERE x.id=$1::uuid AND x.subject_user_id=$2::uuid AND ou.path @> $3::ltree`,[attemptId,scope.userId,viewer]);
@@ -298,6 +320,8 @@ async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,att
   const responses=await client.query(`SELECT question_id,response,final_score::float8 AS final_score,feedback FROM osa.assessment_responses WHERE attempt_id=$1::uuid`,[attemptId]);
   return {
     attempt,
+    deadlineAt:rows[0].deadline_at===null||rows[0].deadline_at===undefined?null:new Date(rows[0].deadline_at as string|Date).toISOString(),
+    serverNow:new Date(rows[0].server_now as string|Date).toISOString(),
     assessment:{id:attempt.assessmentId,code:String(rows[0].code),title:String(rows[0].title),assessmentType:String(rows[0].assessment_type) as Assessment["assessmentType"],durationMinutes:rows[0].duration_minutes===null?null:num(rows[0].duration_minutes),passPercentage:num(rows[0].pass_percentage),feedbackMode:String(rows[0].feedback_mode) as Assessment["feedbackMode"]},
     questions:questions.rows.map((q)=>({id:String(q.id),position:num(q.position),questionType:String(q.question_type) as QuestionType,prompt:String(q.prompt),options:q.options,points:num(q.points),required:bool(q.required)})),
     responses:responses.rows.map((r)=>({questionId:String(r.question_id),response:r.response,finalScore:r.final_score===null?null:num(r.final_score),feedback:String(r.feedback??"")})),
