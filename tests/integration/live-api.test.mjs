@@ -64,8 +64,10 @@ const world = { postgres: false, analyst: null, manager: null, learner: null, ad
 before(async () => {
   const health = await call('/api/health');
   assert.equal(health.response.status, 200);
-  // `persistence: "available"` is only reported when a PostgreSQL pool exists.
-  world.postgres = health.body.persistence === 'available';
+  // The health endpoint names the datastore that actually answered. Deciding
+  // this from `persistence: "available"` would have been wrong: that field is a
+  // literal and is reported by both modes.
+  world.postgres = health.body.datastore === 'postgresql';
 
   world.analyst = await login('analyst@northstar.example', TENANT);
   world.manager = await login('manager@northstar.example', TENANT);
@@ -122,7 +124,10 @@ test('tenant scope is session-derived and datasets are disjoint', async () => {
   assert.notEqual(northstar.body.tenant.id, gulf.body.tenant.id);
 });
 
-test('the tenant administration surfaces answer for a real tenant', async () => {
+test('the tenant administration surfaces answer for a real tenant', async (t) => {
+  // People and organization management is PostgreSQL-only, like the assessment
+  // engine: tenant-admin-store.ts has no JSON-store path at all.
+  if (!world.postgres) return t.skip('Tenant administration is PostgreSQL-only; no database is configured for this run.');
   // Both of these returned 500 for every tenant administrator on PostgreSQL
   // until the delegated scope was converted to ltree before binding.
   const orgs = await call('/api/admin/org-units', { session: world.admin });

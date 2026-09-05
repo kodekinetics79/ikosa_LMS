@@ -9,7 +9,17 @@
 export async function register(): Promise<void> {
   // Only the Node.js runtime reaches persistence; other runtimes have no pool.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  if (process.env.NODE_ENV !== "production") return;
+
+  const { assertFixtureModeIsPermitted, isManagedRuntime } = await import("./lib/server/runtime-mode");
+
+  // Refuses when fixture mode has been asked for somewhere it must never run.
+  // This check applies in BOTH modes, so the guard cannot be skipped by the
+  // very misconfiguration it exists to catch.
+  assertFixtureModeIsPermitted();
+
+  // A development instance, or a production bundle explicitly started in
+  // fixture mode for the test suites. Neither has a datastore to check.
+  if (!isManagedRuntime()) return;
 
   const failures: string[] = [];
 

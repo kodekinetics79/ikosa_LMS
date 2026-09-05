@@ -1,6 +1,7 @@
 import "server-only";
 import type { OsaPersistence } from "./db/repository";
 import { createPostgresPersistence } from "./db/postgres";
+import { isManagedRuntime } from "./runtime-mode";
 
 /**
  * The single place the application obtains durable storage.
@@ -47,9 +48,9 @@ export async function requirePersistence(): Promise<OsaPersistence> {
  * request a user happens to make.
  */
 export async function assertPersistenceReady(): Promise<void> {
-  if (process.env.NODE_ENV !== "production") return;
+  if (!isManagedRuntime()) return;
   if (!postgresConfigured()) {
-    throw new Error("DATABASE_URL must be configured in production.");
+    throw new Error("DATABASE_URL must be configured on a managed instance.");
   }
   await requirePersistence();
 }

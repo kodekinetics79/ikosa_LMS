@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "./domain";
+import { isManagedRuntime } from "./runtime-mode";
 import { seedDatabase } from "./seed";
 
 const dataDir = process.env.IK_DATA_DIR || path.join(process.cwd(), ".data");
@@ -18,7 +19,13 @@ let writeQueue: Promise<unknown> = Promise.resolve();
  * than quietly manufacturing credentials.
  */
 function demoSeedingAllowed(): boolean {
-  if (process.env.NODE_ENV === "production") return false;
+  // Keyed on the runtime mode, not on NODE_ENV. Next.js forces
+  // NODE_ENV=production inside the standalone bundle, so a bundle deliberately
+  // started in fixture mode for the test suites could never seed itself and
+  // died on "Datastore is not initialized". The safe direction is unchanged: a
+  // managed instance still refuses, and fixture mode has to be asked for by
+  // name (see runtime-mode.ts).
+  if (isManagedRuntime()) return false;
   return process.env.SEED_DEMO_DATA !== "false";
 }
 

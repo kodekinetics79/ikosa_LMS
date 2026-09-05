@@ -28,7 +28,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
-import { isUuid, ltreeToPath, pathToLtree, toStorageId } from "../../src/lib/server/db/ids.ts";
+import { isUuid, ltreeToPath, pathToLtree, toStorageId } from "../../src/lib/server/db/ids";
 
 test("a uuid-labelled ltree path survives the domain round trip unchanged", () => {
   const root = randomUUID();
