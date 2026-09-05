@@ -13,6 +13,15 @@ export async function register(): Promise<void> {
 
   const failures: string[] = [];
 
+  if (!process.env.AUTH_SECRET) {
+    // auth.ts refuses to issue a session without this, so an instance missing it
+    // boots cleanly, serves every page, and then returns 500 from POST
+    // /api/auth/login - nobody can sign in and the reason is only in a server
+    // log. Found by running the production bundle against a real database with
+    // AUDIT_HASH_SECRET and DATABASE_URL set and AUTH_SECRET not.
+    failures.push("AUTH_SECRET is not set; no session can be issued and every sign-in would fail.");
+  }
+
   if (!process.env.AUDIT_HASH_SECRET) {
     // audit.ts throws on the first append without this. Better to know now than
     // to discover it when someone records the first piece of evidence.
