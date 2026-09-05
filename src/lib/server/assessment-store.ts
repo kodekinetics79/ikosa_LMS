@@ -291,6 +291,63 @@ export async function publishAssessment(principal:Principal,assessmentId:string,
   });
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Deterministic delivery shuffle.
+ *
+ * A shuffle that used Math.random would reorder the paper on every render and
+ * on every resume, so a learner returning to "question 3" would find a
+ * different question - and their saved answers, which are keyed by question id,
+ * would appear against the wrong prompts. The order therefore has to be a pure
+ * function of something stable and per-attempt: the attempt's uuid.
+ *
+ * This is presentation only. Scoring, the marking queue and the required-item
+ * gate all work from `assessment_items.position` and are unaffected by what
+ * order a learner happened to see.
+ * ------------------------------------------------------------------------- */
+
+/** FNV-1a over the seed, then xorshift32. Small, fast, and identical everywhere. */
+function seededOrder<T>(items: readonly T[], seed: string): T[] {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const next = (): number => {
+    hash ^= hash << 13; hash >>>= 0;
+    hash ^= hash >>> 17;
+    hash ^= hash << 5; hash >>>= 0;
+    return hash / 0x100000000;
+  };
+  // Fisher-Yates, so every permutation is equally likely.
+  const shuffled = [...items];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(next() * (index + 1));
+    [shuffled[index], shuffled[swap]] = [shuffled[swap], shuffled[index]];
+  }
+  return shuffled;
+}
+
+function orderQuestions(questions: LearnerQuestion[], shuffle: boolean, attemptId: string): LearnerQuestion[] {
+  if (!shuffle || questions.length < 2) return questions;
+  return seededOrder(questions, `questions:${attemptId}`);
+}
+
+/**
+ * Reorders a choice-style question's options.
+ *
+ * Only the `choices` array is touched, and each choice keeps its `id` - which
+ * is what the answer key and the saved response both reference - so a shuffled
+ * paper scores identically to an unshuffled one. A question with no `choices`
+ * array (numeric, free text, matching) is returned untouched.
+ */
+function shuffleOptionsFor(options: unknown, shuffle: boolean, seed: string): unknown {
+  if (!shuffle || !options || typeof options !== "object" || Array.isArray(options)) return options;
+  const record = options as { choices?: unknown };
+  if (!Array.isArray(record.choices) || record.choices.length < 2) return options;
+  return { ...record, choices: seededOrder(record.choices, `options:${seed}`) };
+}
+
 async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,attemptId:string):Promise<AttemptWorkspace>{
   const {viewer}=scopePaths(principal); const scope=scopeForPrincipal(principal);
   const {rows}=await client.query(
@@ -300,7 +357,7 @@ async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,att
     // back - got a different amount of time than the exam allowed. The server
     // is the only clock that decides when an attempt is over; the countdown is
     // rendered from these two values and is now only a display of it.
-    `SELECT x.*,a.code,a.title,a.assessment_type,a.duration_minutes,a.pass_percentage,a.feedback_mode,
+    `SELECT x.*,a.code,a.title,a.assessment_type,a.duration_minutes,a.pass_percentage,a.feedback_mode,a.shuffle_questions,a.shuffle_options,
             least(
               CASE WHEN a.duration_minutes IS NULL THEN NULL
                    ELSE x.started_at + make_interval(mins => a.duration_minutes) END,
@@ -323,7 +380,17 @@ async function learnerAttemptWorkspace(client:PoolClient,principal:Principal,att
     deadlineAt:rows[0].deadline_at===null||rows[0].deadline_at===undefined?null:new Date(rows[0].deadline_at as string|Date).toISOString(),
     serverNow:new Date(rows[0].server_now as string|Date).toISOString(),
     assessment:{id:attempt.assessmentId,code:String(rows[0].code),title:String(rows[0].title),assessmentType:String(rows[0].assessment_type) as Assessment["assessmentType"],durationMinutes:rows[0].duration_minutes===null?null:num(rows[0].duration_minutes),passPercentage:num(rows[0].pass_percentage),feedbackMode:String(rows[0].feedback_mode) as Assessment["feedbackMode"]},
-    questions:questions.rows.map((q)=>({id:String(q.id),position:num(q.position),questionType:String(q.question_type) as QuestionType,prompt:String(q.prompt),options:q.options,points:num(q.points),required:bool(q.required)})),
+    // `shuffle_questions` and `shuffle_options` were stored, validated and never
+    // read: delivery always used the authored order, so both settings were
+    // decorative. Shuffling is seeded from the ATTEMPT id, so the order is
+    // stable across a resume, a reconnect and a re-render - a learner who
+    // navigates back to question 3 must find the same question 3 - while
+    // differing between learners and between attempts, which is the point.
+    questions:orderQuestions(
+      questions.rows.map((q)=>({id:String(q.id),position:num(q.position),questionType:String(q.question_type) as QuestionType,prompt:String(q.prompt),options:shuffleOptionsFor(q.options,bool(rows[0].shuffle_options),`${attemptId}:${String(q.id)}`),points:num(q.points),required:bool(q.required)})),
+      bool(rows[0].shuffle_questions),
+      attemptId,
+    ),
     responses:responses.rows.map((r)=>({questionId:String(r.question_id),response:r.response,finalScore:r.final_score===null?null:num(r.final_score),feedback:String(r.feedback??"")})),
   };
 }
