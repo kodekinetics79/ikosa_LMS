@@ -58,6 +58,17 @@ export function AssessmentAttemptClient({ assessmentId, csrfToken }: { assessmen
   const [current, setCurrent] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
+  /**
+   * Per-question save state.
+   *
+   * `save()` used to write the answer into local state and, on failure, only
+   * set the error banner — so a failed save left the answer looking saved. The
+   * learner sees "Answered" in the navigator and a green "Up to date" footer
+   * for a response the server never received, and finds out at submit. An
+   * answer whose save failed is tracked here and reported as unsaved.
+   */
+  const [unsaved, setUnsaved] = useState<Record<string, true>>({});
+  const pendingText = useRef<Map<string, { value: unknown; timer: number }>>(new Map());
   const [error, setError] = useState("");
   const [result, setResult] = useState<AttemptWorkspace["attempt"] | null>(null);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
@@ -121,22 +132,92 @@ export function AssessmentAttemptClient({ assessmentId, csrfToken }: { assessmen
     return () => window.clearInterval(timer);
   }, [result, secondsLeft, submit]);
 
-  async function save(questionId: string, responseValue: unknown) {
-    if (!workspace || result || secondsLeft === 0) return;
-    setAnswers((currentAnswers) => ({ ...currentAnswers, [questionId]: responseValue }));
+  const persist = useCallback(async (attemptId: string, questionId: string, responseValue: unknown) => {
     setSaving(questionId);
     try {
       const response = await fetch("/api/assessment-attempts", {
         method: "PATCH",
         headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
-        body: JSON.stringify({ action: "save_response", attemptId: workspace.attempt.id, questionId, response: responseValue }),
+        body: JSON.stringify({ action: "save_response", attemptId, questionId, response: responseValue }),
       });
       const payload = await response.json() as ApiProblem;
       if (!response.ok) throw new Error(problem(payload, "Unable to save answer"));
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save answer"); }
+      setUnsaved((current) => {
+        if (!current[questionId]) return current;
+        const next = { ...current };
+        delete next[questionId];
+        return next;
+      });
+    } catch (cause) {
+      // Record it against the question, not just in a banner the learner can
+      // dismiss. The navigator and the footer both read this.
+      setUnsaved((current) => ({ ...current, [questionId]: true }));
+      setError(cause instanceof Error ? cause.message : "Unable to save answer");
+    }
     finally { setSaving(null); }
-  }
+  }, [csrfToken]);
 
+  const save = useCallback(async (questionId: string, responseValue: unknown) => {
+    if (!workspace || result || secondsLeft === 0) return;
+    setAnswers((currentAnswers) => ({ ...currentAnswers, [questionId]: responseValue }));
+    const queued = pendingText.current.get(questionId);
+    if (queued) { window.clearTimeout(queued.timer); pendingText.current.delete(questionId); }
+    await persist(workspace.attempt.id, questionId, responseValue);
+  }, [persist, result, secondsLeft, workspace]);
+
+  /**
+   * Typing does not block on the network.
+   *
+   * Text answers were saved on blur alone, with a hint saying so. A learner who
+   * writes an essay and then closes the tab, loses their connection, or simply
+   * runs out of time without clicking elsewhere loses everything they typed —
+   * blur is not an event you can rely on happening. This keeps the local answer
+   * current immediately and writes it through shortly after they stop typing.
+   */
+  const saveDebounced = useCallback((questionId: string, responseValue: unknown) => {
+    if (!workspace || result || secondsLeft === 0) return;
+    setAnswers((currentAnswers) => ({ ...currentAnswers, [questionId]: responseValue }));
+    const attemptId = workspace.attempt.id;
+    const queued = pendingText.current.get(questionId);
+    if (queued) window.clearTimeout(queued.timer);
+    const timer = window.setTimeout(() => {
+      pendingText.current.delete(questionId);
+      void persist(attemptId, questionId, responseValue);
+    }, 1200);
+    pendingText.current.set(questionId, { value: responseValue, timer });
+  }, [persist, result, secondsLeft, workspace]);
+
+  /**
+   * Flush anything still waiting when the page is being hidden or unloaded.
+   *
+   * `pagehide` fires where `beforeunload` is unreliable (mobile Safari, bfcache),
+   * and `visibilitychange` covers a tab switch that never unloads. `keepalive`
+   * lets the request outlive the document.
+   */
+  useEffect(() => {
+    if (!workspace || result) return;
+    const attemptId = workspace.attempt.id;
+    const flush = () => {
+      for (const [questionId, queued] of pendingText.current) {
+        window.clearTimeout(queued.timer);
+        void fetch("/api/assessment-attempts", {
+          method: "PATCH", keepalive: true,
+          headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+          body: JSON.stringify({ action: "save_response", attemptId, questionId, response: queued.value }),
+        }).catch(() => undefined);
+      }
+      pendingText.current.clear();
+    };
+    const onHidden = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHidden);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHidden);
+    };
+  }, [csrfToken, result, workspace]);
+
+  const unsavedCount = useMemo(() => Object.keys(unsaved).length, [unsaved]);
   const answeredCount = useMemo(() => workspace ? workspace.questions.filter((question) => answered(question.questionType, answers[question.id])).length : 0, [answers, workspace]);
   const question = workspace?.questions[current];
 
@@ -152,13 +233,13 @@ export function AssessmentAttemptClient({ assessmentId, csrfToken }: { assessmen
     <header className={styles.playerHeader}><div><Link href="/assessments">← Assessments</Link><span>{workspace.assessment.code}</span><h1>{workspace.assessment.title}</h1></div><div className={styles.headerStats}><span><small>Progress</small><strong>{answeredCount}/{workspace.questions.length}</strong></span>{secondsLeft !== null ? <span className={secondsLeft < 300 ? styles.timeUrgent : ""} role="timer" aria-live={secondsLeft <= 60 ? "assertive" : "off"} aria-label={`Time remaining ${formatTime(secondsLeft)}`}><small>Time left</small><strong>{formatTime(secondsLeft)}</strong></span> : null}</div></header>
     {error ? <div className={styles.error} role="alert">{error}<button onClick={() => setError("")} type="button">×</button></div> : null}
     <div className={styles.playerGrid}>
-      <aside className={styles.questionNav}><div className={styles.navTitle}>Questions <span>{Math.round((answeredCount / Math.max(1,workspace.questions.length))*100)}%</span></div><div className={styles.questionButtons}>{workspace.questions.map((item,index) => <button type="button" key={item.id} className={`${index === current ? styles.currentQuestion : ""} ${answered(item.questionType, answers[item.id]) ? styles.answeredQuestion : ""}`} onClick={() => setCurrent(index)}><span>{index+1}</span><small>{answered(item.questionType, answers[item.id]) ? "Answered" : item.required ? "Required" : "Optional"}</small></button>)}</div><div className={styles.navFooter}><span>Autosave</span><strong>{saving && saving !== "submit" ? "Saving…" : "Up to date"}</strong></div></aside>
-      <main className={styles.questionCanvas}>{question ? <QuestionEditor key={question.id} question={question} value={answers[question.id]} onChange={(value) => save(question.id,value)} disabled={secondsLeft === 0}/>:null}<footer className={styles.canvasFooter}><button type="button" className={styles.secondaryButton} disabled={current===0} onClick={() => setCurrent((value)=>Math.max(0,value-1))}>Previous</button><div>{current < workspace.questions.length-1 ? <button type="button" className={styles.primaryButton} onClick={() => setCurrent((value)=>Math.min(workspace.questions.length-1,value+1))}>Next question</button> : <button type="button" className={styles.submitButton} disabled={saving==="submit"} onClick={() => submit(false)}>{saving==="submit"?"Submitting…":"Submit assessment"}</button>}</div></footer></main>
+      <aside className={styles.questionNav}><div className={styles.navTitle}>Questions <span>{Math.round((answeredCount / Math.max(1,workspace.questions.length))*100)}%</span></div><div className={styles.questionButtons}>{workspace.questions.map((item,index) => <button type="button" key={item.id} className={`${index === current ? styles.currentQuestion : ""} ${answered(item.questionType, answers[item.id]) ? styles.answeredQuestion : ""}`} onClick={() => setCurrent(index)}><span>{index+1}</span><small>{unsaved[item.id] ? "Not saved" : answered(item.questionType, answers[item.id]) ? "Answered" : item.required ? "Required" : "Optional"}</small></button>)}</div><div className={styles.navFooter} aria-live="polite"><span>Autosave</span><strong>{saving && saving !== "submit" ? "Saving…" : unsavedCount > 0 ? `${unsavedCount} not saved` : "Up to date"}</strong></div></aside>
+      <main className={styles.questionCanvas}>{question ? <QuestionEditor key={question.id} question={question} value={answers[question.id]} onChange={(value) => void save(question.id,value)} onType={(value) => saveDebounced(question.id,value)} disabled={secondsLeft === 0}/>:null}<footer className={styles.canvasFooter}><button type="button" className={styles.secondaryButton} disabled={current===0} onClick={() => setCurrent((value)=>Math.max(0,value-1))}>Previous</button><div>{current < workspace.questions.length-1 ? <button type="button" className={styles.primaryButton} onClick={() => setCurrent((value)=>Math.min(workspace.questions.length-1,value+1))}>Next question</button> : <button type="button" className={styles.submitButton} disabled={saving==="submit"} onClick={() => submit(false)}>{saving==="submit"?"Submitting…":"Submit assessment"}</button>}</div></footer></main>
     </div>
   </div>;
 }
 
-function QuestionEditor({ question, value, onChange, disabled }: { question: AttemptWorkspace["questions"][number]; value: unknown; onChange: (value: unknown) => void; disabled: boolean }) {
+function QuestionEditor({ question, value, onChange, onType, disabled }: { question: AttemptWorkspace["questions"][number]; value: unknown; onChange: (value: unknown) => void; onType: (value: unknown) => void; disabled: boolean }) {
   const object = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const choices = choicesOf(question.options);
   const ordering = orderOf(question.options);
@@ -169,8 +250,8 @@ function QuestionEditor({ question, value, onChange, disabled }: { question: Att
     {question.questionType === "single_choice" ? <div className={styles.choiceList}>{choices.map((choice,index)=><label className={`${styles.choice} ${object.value===choice.id?styles.choiceSelected:""}`} key={choice.id}><input disabled={disabled} type="radio" name={question.id} checked={object.value===choice.id} onChange={()=>onChange({value:choice.id})}/><span>{String.fromCharCode(65+index)}</span><strong>{choice.label}</strong></label>)}</div>:null}
     {question.questionType === "multiple_choice" ? <div className={styles.choiceList}>{choices.map((choice,index)=>{const selected=Array.isArray(object.values)&&object.values.map(String).includes(choice.id);return <label className={`${styles.choice} ${selected?styles.choiceSelected:""}`} key={choice.id}><input disabled={disabled} type="checkbox" checked={selected} onChange={()=>{const current=Array.isArray(object.values)?object.values.map(String):[];onChange({values:selected?current.filter((id)=>id!==choice.id):[...current,choice.id]});}}/><span>{String.fromCharCode(65+index)}</span><strong>{choice.label}</strong></label>;})}</div>:null}
     {question.questionType === "true_false" ? <div className={styles.choiceList}>{choices.map((choice)=><label className={`${styles.choice} ${object.value===(choice.id==="true")?styles.choiceSelected:""}`} key={choice.id}><input disabled={disabled} type="radio" name={question.id} checked={object.value===(choice.id==="true")} onChange={()=>onChange({value:choice.id==="true"})}/><strong>{choice.label}</strong></label>)}</div>:null}
-    {(question.questionType === "short_text" || question.questionType === "long_text") ? <div className={styles.textAnswer}><textarea disabled={disabled} rows={question.questionType==="long_text"?10:4} value={draftText} onChange={(event)=>setDraftText(event.target.value)} onBlur={blurSave} placeholder={question.questionType==="long_text"?"Write a clear, complete response…":"Type your answer…"}/><small>Your response saves when you leave this field.</small></div>:null}
-    {question.questionType === "numeric" ? <div className={styles.textAnswer}><input disabled={disabled} type="number" step="any" value={draftText} onChange={(event)=>setDraftText(event.target.value)} onBlur={blurSave} placeholder="Enter a number"/></div>:null}
+    {(question.questionType === "short_text" || question.questionType === "long_text") ? <div className={styles.textAnswer}><textarea disabled={disabled} rows={question.questionType==="long_text"?10:4} value={draftText} onChange={(event)=>{setDraftText(event.target.value);onType({value:event.target.value});}} onBlur={blurSave} placeholder={question.questionType==="long_text"?"Write a clear, complete response…":"Type your answer…"}/><small>Saved automatically as you write.</small></div>:null}
+    {question.questionType === "numeric" ? <div className={styles.textAnswer}><input disabled={disabled} type="number" step="any" value={draftText} onChange={(event)=>{setDraftText(event.target.value);onType({value:event.target.value});}} onBlur={blurSave} placeholder="Enter a number"/></div>:null}
     {question.questionType === "ordering" ? <OrderingAnswer items={ordering} current={Array.isArray(object.order)?object.order.map(String):[]} onChange={(order)=>onChange({order})} disabled={disabled}/>:null}
     {question.questionType === "matching" ? <div className={styles.unsupported}><strong>Matching response UI is being finalized.</strong><span>This question type is supported by the engine but is not enabled for learner delivery in this P1 slice.</span></div>:null}
   </section>;
