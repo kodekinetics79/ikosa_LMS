@@ -550,6 +550,79 @@ describe('assessment engine', () => {
     assert.equal(unpublished.body.status, 'draft');
   });
 
+  test('a learner can read back their own result, and only under the feedback policy', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const suffix = `R${Date.now().toString(36).toUpperCase()}`;
+    const author = world.analyst;
+    const learner = world.learner;
+
+    const bank = await call('/api/assessment-banks', {
+      session: author, method: 'POST',
+      body: { orgUnitId: analystOrg(), code: `RES-${suffix}`, name: `Result bank ${suffix}`, description: '' }
+    });
+    const question = await call('/api/assessment-questions', {
+      session: author, method: 'POST',
+      body: {
+        bankId: bank.body.id, questionType: 'single_choice', prompt: 'Which is least privilege?',
+        options: { choices: [{ id: 'o1', label: 'Only what the task needs' }, { id: 'o2', label: 'Everything' }] },
+        answerKey: { value: 'o1' }, rationale: 'Least privilege grants only what the task needs.',
+        points: 4, reviewStatus: 'approved'
+      }
+    });
+
+    // after_close, with a closing time in the future: the mark must be withheld
+    // even once the attempt is fully graded.
+    const closesAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    const assessment = await call('/api/assessments', {
+      session: author, method: 'POST',
+      body: {
+        orgUnitId: analystOrg(), code: `RES-${suffix}`, title: `Result policy ${suffix}`,
+        assessmentType: 'quiz', passPercentage: 50, attemptLimit: 1,
+        feedbackMode: 'after_close', closesAt
+      }
+    });
+    assert.equal(assessment.response.status, 201, JSON.stringify(assessment.body));
+    await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'attach_question', assessmentId: assessment.body.id, questionId: question.body.id } });
+    await call('/api/assessments', { session: author, method: 'PATCH', body: { action: 'publish', assessmentId: assessment.body.id } });
+
+    const attempt = await call('/api/assessment-attempts', { session: learner, method: 'POST', body: { assessmentId: assessment.body.id } });
+    assert.equal(attempt.response.status, 201, JSON.stringify(attempt.body));
+    await call('/api/assessment-attempts', { session: learner, method: 'PATCH', body: { action: 'save_response', attemptId: attempt.body.attempt.id, questionId: attempt.body.questions[0].id, response: { value: 'o1' } } });
+    const submitted = await call('/api/assessment-attempts', { session: learner, method: 'PATCH', body: { action: 'submit', attemptId: attempt.body.attempt.id } });
+    assert.equal(submitted.body.attempt.status, 'graded');
+    assert.equal(submitted.body.attempt.passed, true);
+
+    // The learner can read the attempt back at all — before this there was no
+    // GET, so a result was unreachable the moment the player was navigated away
+    // from.
+    const list = await call('/api/assessment-attempts', { session: learner });
+    assert.equal(list.response.status, 200, JSON.stringify(list.body));
+    assert.ok(list.body.items.some((item) => item.attempt.id === attempt.body.attempt.id));
+
+    const result = await call(`/api/assessment-attempts?attemptId=${attempt.body.attempt.id}`, { session: learner });
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    // The overall score is never gated: a learner is always entitled to know
+    // whether they passed.
+    assert.equal(result.body.attempt.passed, true);
+    assert.equal(result.body.attempt.percentage, 100);
+    // The per-question mark is, and the reason is stated rather than silent.
+    assert.equal(result.body.feedbackReleased, false);
+    assert.equal(result.body.feedbackReleaseReason, 'awaiting_close');
+    assert.equal(result.body.responses[0].score, null, 'the per-item mark is withheld until the assessment closes');
+    assert.equal(result.body.responses[0].markWithheld, true);
+    // And in no mode, at no point, does a learner-facing payload carry the key.
+    const payload = JSON.stringify(result.body);
+    assert.equal(payload.includes('answerKey'), false);
+    assert.equal(payload.includes('answer_key'), false);
+    assert.equal(payload.includes('rationale'), false);
+    assert.equal(payload.includes('Least privilege grants only'), false);
+
+    // Another learner's attempt id must not resolve to their script.
+    const stranger = await call(`/api/assessment-attempts?attemptId=${attempt.body.attempt.id}`, { session: world.manager });
+    assert.equal(stranger.response.status, 403, 'the learner result view is learner-only');
+  });
+
   test('an exam an author does not administer cannot be edited', async (t) => {
     if (!world.postgres) return t.skip(skipReason);
     // A syntactically valid uuid that belongs to nobody must 404, not 500 and
