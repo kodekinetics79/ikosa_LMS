@@ -49,7 +49,8 @@ const EVIDENCE_COLUMNS = `e.id, e.tenant_id, e.org_unit_id, e.subject_user_id, e
   e.source_reference, e.status`;
 const COURSE_COLUMNS = `c.id, c.tenant_id, c.org_unit_id, c.code, c.title, c.description, c.skill_id,
   c.target_level, c.evidence_rule, c.passing_score::float8 AS passing_score, c.validity_months,
-  c.version, c.status, c.created_at`;
+  c.version, c.status, c.created_at,
+  c.visibility, c.summary, c.instructor_user_id, c.list_price_cents, c.currency`;
 const enrollmentColumns = (prefix = "en."): string =>
   `${prefix}id, ${prefix}tenant_id, ${prefix}org_unit_id, ${prefix}course_id, ${prefix}subject_user_id,
    ${prefix}source, ${prefix}intervention_id, ${prefix}gap_case_id, ${prefix}status,
