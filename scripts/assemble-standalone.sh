@@ -21,8 +21,19 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 
+# Vercel builds its own output: next.config.ts sets `output: undefined` when the
+# VERCEL env var is present, precisely because a standalone build makes Vercel
+# report `No Output Directory named "public"`. So an absent bundle is a normal,
+# correct state there and must not fail the build — chaining this into
+# `npm run build` without this branch broke every Vercel deployment while CI
+# stayed green, because CI is the only place that produces a standalone bundle.
 if [[ ! -f .next/standalone/server.js ]]; then
-  printf 'No standalone bundle at .next/standalone. Run npm run build first.\n' >&2
+  printf 'No standalone bundle in this build (Vercel builds its own output); nothing to assemble.\n'
+  exit 0
+fi
+
+if [[ ! -d .next ]]; then
+  printf 'No .next directory at all. The build did not run.\n' >&2
   exit 1
 fi
 
