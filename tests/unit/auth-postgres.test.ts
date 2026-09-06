@@ -365,7 +365,7 @@ test("CSRF verification accepts the issued token and rejects any other", async (
   const valid = new Request("http://localhost/api/evidence", { method: "POST", headers: { "x-csrf-token": issued!.csrfToken } });
   assert.doesNotThrow(() => auth!.assertCsrf(valid, principal));
 
-  for (const wrong of ["", "not-the-token", auth!.serializeSessionCookie(principal.session)]) {
+  for (const wrong of ["", "not-the-token", auth!.serializeSessionCookie(principal.session, valid)]) {
     const invalid = new Request("http://localhost/api/evidence", { method: "POST", headers: { "x-csrf-token": wrong } });
     assert.throws(() => auth!.assertCsrf(invalid, principal), /Invalid CSRF token/);
   }

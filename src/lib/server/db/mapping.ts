@@ -229,6 +229,15 @@ export function toCourse(row: Row): Course {
     evidenceRule: str(row.evidence_rule) as Course["evidenceRule"], passingScore: num(row.passing_score),
     validityMonths: row.validity_months === null || row.validity_months === undefined ? null : int(row.validity_months),
     version: int(row.version), status: str(row.status) as Course["status"], createdAt: iso(row.created_at),
+    // Migration 009. Every one of these has a NOT NULL DEFAULT or is nullable
+    // in the schema, so a row read through a select list that predates 009
+    // still maps -- but it maps to the DEFAULT, not to what is stored. The
+    // guard against that is COURSE_COLUMNS in postgres.ts naming all five.
+    visibility: str(row.visibility ?? "organization") as Course["visibility"],
+    summary: str(row.summary ?? ""),
+    instructorUserId: strOrNull(row.instructor_user_id),
+    listPriceCents: numOrNull(row.list_price_cents),
+    currency: strOrNull(row.currency),
   };
 }
 
@@ -237,6 +246,7 @@ export function toCourseModule(row: Row): CourseModule {
     id: str(row.id), tenantId: str(row.tenant_id), courseId: str(row.course_id),
     position: int(row.position), title: str(row.title), kind: str(row.kind) as CourseModule["kind"],
     durationMinutes: int(row.duration_minutes), required: bool(row.required),
+    assessmentId: strOrNull(row.assessment_id),
   };
 }
 

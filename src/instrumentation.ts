@@ -9,9 +9,28 @@
 export async function register(): Promise<void> {
   // Only the Node.js runtime reaches persistence; other runtimes have no pool.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  if (process.env.NODE_ENV !== "production") return;
+
+  const { assertFixtureModeIsPermitted, isManagedRuntime } = await import("./lib/server/runtime-mode");
+
+  // Refuses when fixture mode has been asked for somewhere it must never run.
+  // This check applies in BOTH modes, so the guard cannot be skipped by the
+  // very misconfiguration it exists to catch.
+  assertFixtureModeIsPermitted();
+
+  // A development instance, or a production bundle explicitly started in
+  // fixture mode for the test suites. Neither has a datastore to check.
+  if (!isManagedRuntime()) return;
 
   const failures: string[] = [];
+
+  if (!process.env.AUTH_SECRET) {
+    // auth.ts refuses to issue a session without this, so an instance missing it
+    // boots cleanly, serves every page, and then returns 500 from POST
+    // /api/auth/login - nobody can sign in and the reason is only in a server
+    // log. Found by running the production bundle against a real database with
+    // AUDIT_HASH_SECRET and DATABASE_URL set and AUTH_SECRET not.
+    failures.push("AUTH_SECRET is not set; no session can be issued and every sign-in would fail.");
+  }
 
   if (!process.env.AUDIT_HASH_SECRET) {
     // audit.ts throws on the first append without this. Better to know now than
@@ -36,6 +55,20 @@ export async function register(): Promise<void> {
       if (!gateway) failures.push("DATABASE_URL is set but no PostgreSQL connection could be created.");
     } catch (error) {
       failures.push(`PostgreSQL is unusable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const controlPlaneUrl = process.env.CONTROL_PLANE_DATABASE_URL?.trim();
+  if (controlPlaneUrl) {
+    try {
+      // The SaaS control plane crosses tenant boundaries only to provision the
+      // minimum customer identity records. It must therefore use its own
+      // deliberately restricted login and never a migration owner, Neon
+      // `neon_superuser` member, or any BYPASSRLS connection.
+      const { assertControlPlaneConnectionSafe } = await import("./lib/server/control-plane-readiness");
+      await assertControlPlaneConnectionSafe(controlPlaneUrl);
+    } catch (error) {
+      failures.push(`Control-plane database role is unusable: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

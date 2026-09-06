@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { ProductShell } from "@/components/product-shell";
 import { principalFromCookies } from "@/lib/server/auth";
-import { readDatabase } from "@/lib/server/store";
+import { tenantShellContext } from "@/lib/server/tenant-runtime";
 
 /**
  * Authoritative access control for every authenticated screen.
@@ -9,20 +9,20 @@ import { readDatabase } from "@/lib/server/store";
  * The proxy gate only checks that a cookie exists; this layout resolves and
  * validates the session on the server before any protected screen renders, and
  * supplies the real signed-in identity so the shell never displays a fabricated
- * user or workspace.
+ * user or workspace. The tenant/org lookup follows the same datastore seam as
+ * authentication: PostgreSQL in deployment, JSON only in local/demo mode.
  */
 export default async function PlatformLayout({ children }: { children: React.ReactNode }) {
   let identity;
   try {
     const principal = await principalFromCookies();
-    const database = await readDatabase();
-    const tenant = database.tenants.find((candidate) => candidate.id === principal.tenantId);
+    const { tenant, organizations } = await tenantShellContext(principal);
     identity = {
       displayName: principal.user.displayName,
       email: principal.user.email,
       roles: principal.roles,
       tenantName: tenant?.name ?? "Unknown workspace",
-      organizationCount: database.orgUnits.filter((unit) => unit.tenantId === principal.tenantId).length,
+      organizationCount: organizations.length,
     };
   } catch {
     redirect("/login");

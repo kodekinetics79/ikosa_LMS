@@ -62,7 +62,7 @@ function digestMatches(event: AuditEvent): boolean {
 export function appendAuditWithin(database: Database, input: AuditInput): AuditEvent {
   const previous = database.auditEvents.filter((event) => event.tenantId === input.tenantId).at(-1);
   const unsigned: Omit<AuditEvent, "hash"> = {
-    id: id("aud"),
+    id: id(),
     tenantId: input.tenantId,
     actorUserId: input.actorUserId,
     action: input.action,

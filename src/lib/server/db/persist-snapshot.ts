@@ -41,12 +41,21 @@ function byId<T extends { id: string }>(items: readonly T[]): Map<string, T> {
   return new Map(items.map((item) => [item.id, item]));
 }
 
-async function insert(db: Queryable, table: string, row: Row): Promise<void> {
+/**
+ * `conflictTarget` is "(id)" for a table with a surrogate key and "" for a
+ * junction table, which has none. Emitting `ON CONFLICT (id)` unconditionally
+ * meant every write that touched a junction — creating a TNA study with target
+ * roles, saving a signal's skills, changing a user's roles — failed with
+ * `column "id" does not exist`. The bare `ON CONFLICT DO NOTHING` matches any
+ * unique constraint the table does have.
+ */
+async function insert(db: Queryable, table: string, row: Row, conflictTarget = "(id)"): Promise<void> {
   const columns = Object.keys(row);
   const values = columns.map((column) => row[column]);
   const placeholders = columns.map((_, index) => `$${index + 1}`);
+  const target = conflictTarget ? `${conflictTarget} ` : "";
   await db.query(
-    `INSERT INTO osa.${table} (${columns.join(", ")}) VALUES (${placeholders.join(", ")}) ON CONFLICT (id) DO NOTHING`,
+    `INSERT INTO osa.${table} (${columns.join(", ")}) VALUES (${placeholders.join(", ")}) ON CONFLICT ${target}DO NOTHING`,
     values,
   );
 }
@@ -135,7 +144,7 @@ export async function persistSnapshotChanges(
         // Replace wholesale: these carry no identity of their own, so a diff
         // would be more code than a delete-and-reinsert and no more correct.
         await db.query(`DELETE FROM osa.${junction.table} WHERE ${junction.parentColumn} = $1`, [toStorageId(id)]);
-        for (const child of junction.toRows(item)) await insert(db, junction.table, child);
+        for (const child of junction.toRows(item)) await insert(db, junction.table, child, "");
       }
     }
 

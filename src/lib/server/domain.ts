@@ -155,16 +155,6 @@ export type AuditEvent = {
   hash: string;
 };
 
-
-/* ---------------------------------------------------------------------------
- * Learning delivery.
- *
- * The LMS is the fulfilment engine for an Intervention, not a parallel product.
- * A Course develops one Skill; completing it can produce Evidence against that
- * Skill, which is what closes a GapCase. Evidence remains the single authority
- * on capability - an Enrollment only ever records learning progress.
- * ------------------------------------------------------------------------- */
-
 export type Course = {
   id: Id;
   tenantId: Id;
@@ -172,24 +162,35 @@ export type Course = {
   code: string;
   title: string;
   description: string;
-  /** The capability this course develops. Evidence is emitted against it. */
   skillId: Id;
-  /** Proficiency level a successful completion can attest to (0-5). */
   targetLevel: number;
-  /**
-   * Whether completion may produce competence evidence at all.
-   * `attendance_only` courses record completion but emit no Evidence: a viewed
-   * lesson is not proof that someone can perform the work, and manufacturing
-   * evidence from it would silently corrupt every downstream readiness number.
-   */
   evidenceRule: "assessed" | "attendance_only";
-  /** Minimum normalized assessment score (0-1) required to pass. */
   passingScore: number;
-  /** Months an emitted Evidence record stays valid; null means no expiry. */
   validityMonths: number | null;
   version: number;
   status: "draft" | "published" | "retired";
   createdAt: string;
+  /**
+   * Who may FIND this course, which is a separate question from who may be
+   * enrolled on it. 'organization' is the rule the rest of the product already
+   * uses for delivery (owned at or above the viewer's org); 'tenant' widens it
+   * to everyone in the tenant; 'listed' additionally marks the course as
+   * offered for discovery. See `visibilityPredicate` in catalog.ts — 'listed'
+   * is NOT cross-tenant, and cannot be until somebody decides it should be.
+   */
+  visibility: "organization" | "tenant" | "listed";
+  /** Short catalogue blurb. `description` is the syllabus and is far too long for a card. */
+  summary: string;
+  instructorUserId: Id | null;
+  /**
+   * A DISPLAYED asking price, in minor units. Nothing in this system can take
+   * money: there is no order, no ledger, no payout and no charge. Rendering a
+   * Buy control against this field would be a lie about what happens next.
+   */
+  listPriceCents: number | null;
+  /** ISO-4217, upper case. Null exactly when `listPriceCents` is null — the
+   *  schema's `courses_price_needs_currency` CHECK refuses any other pairing. */
+  currency: string | null;
 };
 
 export type CourseModule = {
@@ -198,9 +199,28 @@ export type CourseModule = {
   courseId: Id;
   position: number;
   title: string;
+  /**
+   * What this step of the course IS.
+   *
+   * Only `lesson`, `document`, `video` and `assessment` are delivered. `scorm`
+   * is a value the schema has always accepted and that nothing implements — no
+   * player, no manifest parsing, no runtime, no CMI data model — so it is not
+   * offered by authoring and must not be described to a customer as supported.
+   * It is kept in the union rather than removed because removing it would need
+   * a data migration for a value no row currently holds.
+   */
   kind: "lesson" | "document" | "video" | "scorm" | "assessment";
   durationMinutes: number;
   required: boolean;
+  /**
+   * The assessment this module delivers, for `kind: "assessment"`.
+   *
+   * This is the join that lets a graded attempt satisfy a course requirement.
+   * Before it existed, an "assessment" module was a label and the learner typed
+   * their own score into a free-text box. Null on every other kind, which the
+   * schema enforces (migration 008).
+   */
+  assessmentId: Id | null;
 };
 
 export type Enrollment = {
@@ -208,10 +228,8 @@ export type Enrollment = {
   tenantId: Id;
   orgUnitId: Id;
   courseId: Id;
-  /** Named subjectUserId so the existing tenant/org/self scoping helpers apply unchanged. */
   subjectUserId: Id;
   source: "self" | "assigned" | "intervention";
-  /** Junction back to the assurance spine. Set when learning fulfils an intervention. */
   interventionId: Id | null;
   gapCaseId: Id | null;
   status: "enrolled" | "in_progress" | "completed" | "withdrawn";
@@ -219,9 +237,7 @@ export type Enrollment = {
   dueDate: string | null;
   startedAt: string | null;
   completedAt: string | null;
-  /** Normalized final assessment score (0-1); null for attendance-only courses. */
   score: number | null;
-  /** The Evidence this completion produced, when it produced any. */
   evidenceId: Id | null;
   createdAt: string;
 };
@@ -235,18 +251,6 @@ export type ModuleCompletion = {
   score: number | null;
 };
 
-
-/* ---------------------------------------------------------------------------
- * Change signals.
- *
- * The front of the continuous-TNA funnel. A Signal is an external or internal
- * change that may alter what the workforce must be able to do: a regulation, an
- * incident, an audit finding, a process change. Triage either links it to a TNA
- * study or dismisses it with a stated reason - a signal is never silently
- * dropped, because "nobody looked at it" is the failure this product exists to
- * prevent.
- * ------------------------------------------------------------------------- */
-
 export type Signal = {
   id: Id;
   tenantId: Id;
@@ -256,33 +260,21 @@ export type Signal = {
   title: string;
   summary: string;
   detectedAt: string;
-  /** When the change starts to bite. Drives triage urgency. */
   effectiveAt: string | null;
   severity: "critical" | "high" | "medium" | "low";
   status: "new" | "triaged" | "linked" | "dismissed";
   affectedJobRoleIds: Id[];
   affectedSkillIds: Id[];
-  /** Set when triage converts the signal into a study. */
   linkedStudyId: Id | null;
   triagedByUserId: Id | null;
   triagedAt: string | null;
   dismissedReason: string | null;
 };
 
-/* ---------------------------------------------------------------------------
- * Notifications.
- *
- * A compliance platform is largely a chasing machine: evidence expires,
- * enrollments fall due, gaps go unowned. These are DERIVED from state by an
- * idempotent sweep rather than written ad hoc, so the same condition can never
- * raise two rows and a missed sweep never loses one.
- * ------------------------------------------------------------------------- */
-
 export type Notification = {
   id: Id;
   tenantId: Id;
   orgUnitId: Id;
-  /** The person who needs to act. */
   subjectUserId: Id;
   kind:
     | "evidence_expiring"
@@ -297,14 +289,99 @@ export type Notification = {
   resourceType: string;
   resourceId: Id;
   dueAt: string | null;
-  /**
-   * Stable identity for the underlying condition. The sweep upserts on this, so
-   * running it twice - or twice a minute - cannot duplicate a reminder.
-   */
   dedupeKey: string;
   createdAt: string;
   readAt: string | null;
   resolvedAt: string | null;
+};
+
+/* Assessment entities are PostgreSQL-only during the P1 cutover. */
+export type QuestionType =
+  | "single_choice"
+  | "multiple_choice"
+  | "true_false"
+  | "short_text"
+  | "long_text"
+  | "numeric"
+  | "matching"
+  | "ordering";
+
+export type BloomLevel = "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create";
+
+export type QuestionBank = {
+  id: Id;
+  tenantId: Id;
+  orgUnitId: Id;
+  code: string;
+  name: string;
+  description: string;
+  status: "draft" | "active" | "retired";
+  createdBy: Id;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssessmentQuestion = {
+  id: Id;
+  tenantId: Id;
+  bankId: Id;
+  questionType: QuestionType;
+  prompt: string;
+  options: unknown;
+  answerKey: unknown;
+  rationale: string;
+  points: number;
+  difficulty: number;
+  bloomLevel: BloomLevel;
+  skillId: Id | null;
+  rubricId: Id | null;
+  origin: "manual" | "ai" | "import";
+  reviewStatus: "draft" | "approved" | "rejected";
+  version: number;
+  createdBy: Id;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Assessment = {
+  id: Id;
+  tenantId: Id;
+  orgUnitId: Id;
+  courseId: Id | null;
+  code: string;
+  title: string;
+  description: string;
+  assessmentType: "quiz" | "exam" | "practice";
+  status: "draft" | "published" | "retired";
+  durationMinutes: number | null;
+  passPercentage: number;
+  attemptLimit: number;
+  shuffleQuestions: boolean;
+  shuffleOptions: boolean;
+  feedbackMode: "immediate" | "after_submit" | "after_close";
+  opensAt: string | null;
+  closesAt: string | null;
+  createdBy: Id;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssessmentAttempt = {
+  id: Id;
+  tenantId: Id;
+  assessmentId: Id;
+  subjectUserId: Id;
+  attemptNumber: number;
+  status: "in_progress" | "submitted" | "graded" | "void";
+  startedAt: string;
+  submittedAt: string | null;
+  gradedAt: string | null;
+  scorePoints: number | null;
+  maxPoints: number | null;
+  percentage: number | null;
+  passed: boolean | null;
+  graderUserId: Id | null;
+  createdAt: string;
 };
 
 export type Database = {

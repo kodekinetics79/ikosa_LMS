@@ -1,4 +1,5 @@
 import { AuthError } from "./auth";
+import { RuleError } from "./errors";
 
 export function requestId(request: Request): string {
   return request.headers.get("x-request-id") ?? crypto.randomUUID();
@@ -15,6 +16,9 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
 export function problem(error: unknown, id: string): Response {
   if (error instanceof AuthError) return json({ error: error.message, requestId: id }, { status: error.status });
   if (error instanceof ValidationError) return json({ error: error.message, fields: error.fields, requestId: id }, { status: 400 });
+  // A refusal the caller is entitled to read. Anything that is not one of these
+  // three keeps the opaque 500 below, which is what an actual fault deserves.
+  if (error instanceof RuleError) return json({ error: error.message, requestId: id }, { status: error.status });
   console.error("API request failed", { requestId: id, error });
   return json({ error: "An unexpected error occurred", requestId: id }, { status: 500 });
 }

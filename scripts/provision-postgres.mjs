@@ -121,7 +121,7 @@ function describeConnection(connectionString) {
  * derived from data. Column names come from write-mapping.ts, also literals.
  * ------------------------------------------------------------------------- */
 
-/** The 22 tables 001 and 002 create, in dependency order. */
+/** The tables 001 and 002 create, in dependency order. This seed writes these and no others; later migrations may add more. */
 const ALL_TABLES = [
   "tenants", "org_units", "users", "user_roles", "sessions", "skills", "job_roles",
   "requirements", "tna_studies", "tna_target_roles", "evidence", "gap_cases",
@@ -191,7 +191,7 @@ async function insertRows(client, table, rows) {
   return { attempted: rows.length, inserted };
 }
 
-/** Row counts for all 22 tables: the whole table, and the rows this seed owns. */
+/** Row counts for every seeded table: the whole table, and the rows this seed owns. */
 async function tableCounts(client, seedTenantIds) {
   const counts = {};
   for (const table of ALL_TABLES) {
@@ -550,12 +550,20 @@ async function main() {
     const role = await inspectRuntimeRole(client);
     console.log(`  running as       : ${role.role} (bypassRls=${role.bypassRls}, superuser=${role.superuser}, ownsTables=${role.ownedTables})`);
 
+    // Presence, not an exact count. The original check compared
+    // `count(*) === ALL_TABLES.length`, which made every later migration break
+    // provisioning: 005 adds nine assessment tables, so a correctly migrated
+    // database reported "has 35 tables; expected 22" and refused to seed a
+    // schema that was in fact ahead of, not behind, this script.
     const schema = await client.query(
-      "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'osa'",
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'osa'",
     );
-    if (schema.rows[0].n !== ALL_TABLES.length) {
+    const present = new Set(schema.rows.map((row) => row.table_name));
+    const missing = ALL_TABLES.filter((table) => !present.has(table));
+    if (missing.length > 0) {
       throw new Error(
-        `Schema osa has ${schema.rows[0].n} tables; expected ${ALL_TABLES.length}. Apply 001_initial.sql and 002_learning_and_signals.sql first.`,
+        `Schema osa is missing ${missing.length} table(s) this seed writes: ${missing.join(", ")}. ` +
+        "Apply database/postgres/001_initial.sql and 002_learning_and_signals.sql first.",
       );
     }
 

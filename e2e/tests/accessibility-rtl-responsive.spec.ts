@@ -1,17 +1,30 @@
 import { expect, test } from '@playwright/test';
 import { expectNoSeriousA11yViolations } from '../fixtures/accessibility';
+import { anyTnaStudyId } from '../fixtures/discovery';
 import { loginAs } from '../fixtures/session';
 
 // Every route reachable from primary navigation is gated, not a sample of four.
 // A screen that is not scanned is a screen that regresses silently.
 const AUDIT_ONLY = new Set(['/audit']);
-for (const route of ['/', '/signals', '/studies', '/learning', '/catalog', '/notifications', '/evidence', '/interventions', '/studies/tna_field_2026/gaps', '/audit']) {
+const STATIC_ROUTES = ['/', '/signals', '/studies', '/learning', '/catalog', '/notifications', '/evidence', '/interventions', '/audit'];
+
+for (const route of STATIC_ROUTES) {
   test(`@a11y ${route} has no serious or critical automated violations`, async ({ page }) => {
     await loginAs(page, AUDIT_ONLY.has(route) ? 'auditor' : 'analyst');
     await page.goto(route);
     await expectNoSeriousA11yViolations(page);
   });
 }
+
+// The gap explorer is addressed by study id. `tna_field_2026` is a JSON-store
+// literal; PostgreSQL derives a uuid, so the id is read back from /api/tna and
+// the scan runs against a study that actually exists.
+test('@a11y the gap explorer for a real study has no serious or critical automated violations', async ({ page }) => {
+  await loginAs(page, 'analyst');
+  const studyId = await anyTnaStudyId(page);
+  await page.goto(`/studies/${studyId}/gaps`);
+  await expectNoSeriousA11yViolations(page);
+});
 
 test('@critical Arabic switches document direction and critical content remains usable', async ({ page }) => {
   await loginAs(page, 'analyst');

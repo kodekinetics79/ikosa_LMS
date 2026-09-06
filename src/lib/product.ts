@@ -9,24 +9,23 @@ export const product = {
 /**
  * Single source of truth for primary navigation.
  *
- * This previously declared `/tna` and `/readiness`, neither of which is a route
- * in this application, while the shell carried its own separate list. Two
- * navigation definitions that can disagree is one too many, so the shell now
- * consumes this and maps `icon` onto a component.
- *
  * Every href here MUST correspond to a real route. A link to a page that does
- * not exist is a defect, not a placeholder.
+ * not exist is a defect, not a placeholder. `/admin` is role-gated by the shell
+ * and is rendered only for tenant administrators.
  */
 export const primaryNavigation = [
-  { href: "/", label: "Readiness home", icon: "home" },
+  { href: "/workspace", label: "Workspace home", icon: "home" },
+  { href: "/learning", label: "My learning", icon: "learning" },
+  { href: "/sessions", label: "Live sessions", icon: "session" },
+  { href: "/assessments", label: "Assessments", icon: "assessment" },
+  { href: "/catalog", label: "Catalogue", icon: "catalog" },
   { href: "/signals", label: "Signal inbox", icon: "signal" },
   { href: "/studies", label: "TNA studies", icon: "study" },
-  { href: "/learning", label: "My learning", icon: "learning" },
-  { href: "/catalog", label: "Catalogue", icon: "catalog" },
-  { href: "/notifications", label: "Notifications", icon: "bell" },
   { href: "/evidence", label: "Evidence", icon: "evidence" },
   { href: "/interventions", label: "Interventions", icon: "action" },
+  { href: "/notifications", label: "Notifications", icon: "bell" },
   { href: "/audit", label: "Audit room", icon: "audit" },
+  { href: "/admin", label: "Tenant admin", icon: "admin", tenantAdminOnly: true },
 ] as const;
 
 export type NavItem = (typeof primaryNavigation)[number];

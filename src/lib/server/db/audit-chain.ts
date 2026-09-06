@@ -12,7 +12,7 @@ import { newId } from "./ids";
  * because it is the sharpest incompatibility the migration has:
  *
  *   * `audit.ts::appendAuditWithin` mints the event id itself, via
- *     `security.ts::id("aud")`, which produces `aud_<24 hex>`.
+ *     `security.ts::id()`, which produces `aud_<24 hex>`.
  *   * `osa.audit_events.id` is `uuid`. `'aud_9f3c…'::uuid` is a syntax error.
  *   * The id is part of the HMAC input. So mapping it to a uuid AFTER signing
  *     produces a row whose stored hash cannot be recomputed from its own

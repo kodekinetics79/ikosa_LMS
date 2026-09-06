@@ -15,6 +15,33 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+
+    # PostgreSQL is the system of record, so CI runs against one. Without it the
+    # integration and browser suites could only ever exercise the local fixture
+    # datastore — a path production does not take — and the assessment engine,
+    # which has no fixture implementation, would never run at all.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-postgres-not-a-production-secret
+          POSTGRES_DB: ik_osa
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ik_osa"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      # The MIGRATION connection. The application never uses it: the provisioner
+      # creates a separate login with no BYPASSRLS, no ownership and the narrow
+      # grant matrix from migrations 002 and 007, and that is what the bundle
+      # connects as. Proving the schema against a privileged role would prove
+      # nothing about whether the application can see its own rows.
+      IK_ADMIN_DATABASE_URL: postgresql://postgres:ci-postgres-not-a-production-secret@127.0.0.1:5432/ik_osa
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,24 +52,87 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+      - name: Apply migrations and load the demo fixture
+        run: ./scripts/provision-test-database.sh
+
+      # Runs the production bundle against the restricted runtime role, with RLS
+      # enforcing the tenant boundary exactly as a deployment does.
       - run: npm run test:integration
 
   browser:
     runs-on: ubuntu-latest
     needs: validate
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-postgres-not-a-production-secret
+          POSTGRES_DB: ik_osa
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ik_osa"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      IK_ADMIN_DATABASE_URL: postgresql://postgres:ci-postgres-not-a-production-secret@127.0.0.1:5432/ik_osa
+      IK_RUNTIME_URL_FILE: /tmp/ik-runtime-url
+      E2E_BASE_URL: http://127.0.0.1:3000
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
-      - run: cp .env.example .env
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run build
-      - run: HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js > /tmp/ik-osa.log 2>&1 &
-      - run: ./scripts/wait-for-http.sh http://127.0.0.1:3000/api/health 90
+
+      - name: Apply migrations and load the demo fixture
+        run: ./scripts/provision-test-database.sh
+
+      - name: Start the application against PostgreSQL
+        run: |
+          # npm run build already assembles the bundle; assert it rather than
+          # assume it, because a page served without its static chunks looks
+          # like a product bug for the rest of the job.
+          test -d .next/standalone/.next/static || { echo "standalone bundle has no static assets" >&2; exit 1; }
+          # Test-only secrets, generated per run and never leaving the runner.
+          # The bundle boots with the same requirements a deployment has rather
+          # than with those requirements relaxed.
+          {
+            echo "AUTH_SECRET=$(openssl rand -hex 32)"
+            echo "AUDIT_HASH_SECRET=$(openssl rand -hex 32)"
+          } >> "$GITHUB_ENV"
+          DATABASE_URL="$(cat "$IK_RUNTIME_URL_FILE")" \
+          AUTH_SECRET="$(openssl rand -hex 32)" \
+          AUDIT_HASH_SECRET="$(openssl rand -hex 32)" \
+          DEFAULT_TENANT_SLUG=northstar \
+          HOSTNAME=127.0.0.1 PORT=3000 \
+            node .next/standalone/server.js > /tmp/ik-osa.log 2>&1 &
+
+      - name: Wait for the application
+        run: |
+          if ! ./scripts/wait-for-http.sh "$E2E_BASE_URL/api/health" 90; then
+            cat /tmp/ik-osa.log || true
+            exit 1
+          fi
+          # Fail loudly if the browser suite is about to run against the wrong
+          # datastore. A green run over fixtures would be a false report.
+          datastore="$(curl -fsS "$E2E_BASE_URL/api/health" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).datastore)))')"
+          if [ "$datastore" != "postgresql" ]; then
+            echo "Expected the browser suite to run against PostgreSQL, got: $datastore" >&2
+            cat /tmp/ik-osa.log || true
+            exit 1
+          fi
+
       - run: npm run test:e2e -- --project=chromium --grep @critical
+
       - if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -322,6 +322,14 @@ export function fromCourse(course: Course): StorageRow {
     version: course.version,
     status: course.status,
     created_at: course.createdAt,
+    // Migration 009. Emitted unconditionally so an UPDATE clears a price the
+    // author removed: persist-snapshot's UPDATE only assigns the columns this
+    // row names, so omitting them when null would leave the old price standing.
+    visibility: course.visibility,
+    summary: course.summary,
+    instructor_user_id: toStorageIdOrNull(course.instructorUserId),
+    list_price_cents: course.listPriceCents,
+    currency: course.currency,
   };
 }
 
@@ -335,6 +343,7 @@ export function fromCourseModule(module: CourseModule): StorageRow {
     kind: module.kind,
     duration_minutes: module.durationMinutes,
     required: module.required,
+    assessment_id: toStorageIdOrNull(module.assessmentId),
   };
 }
 

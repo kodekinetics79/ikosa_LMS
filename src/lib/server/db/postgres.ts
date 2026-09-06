@@ -49,14 +49,15 @@ const EVIDENCE_COLUMNS = `e.id, e.tenant_id, e.org_unit_id, e.subject_user_id, e
   e.source_reference, e.status`;
 const COURSE_COLUMNS = `c.id, c.tenant_id, c.org_unit_id, c.code, c.title, c.description, c.skill_id,
   c.target_level, c.evidence_rule, c.passing_score::float8 AS passing_score, c.validity_months,
-  c.version, c.status, c.created_at`;
+  c.version, c.status, c.created_at,
+  c.visibility, c.summary, c.instructor_user_id, c.list_price_cents, c.currency`;
 const enrollmentColumns = (prefix = "en."): string =>
   `${prefix}id, ${prefix}tenant_id, ${prefix}org_unit_id, ${prefix}course_id, ${prefix}subject_user_id,
    ${prefix}source, ${prefix}intervention_id, ${prefix}gap_case_id, ${prefix}status,
    ${prefix}assigned_by_user_id, ${prefix}due_date::text AS due_date, ${prefix}started_at,
    ${prefix}completed_at, ${prefix}score::float8 AS score, ${prefix}evidence_id, ${prefix}created_at`;
 const ENROLLMENT_COLUMNS = enrollmentColumns();
-const MODULE_COLUMNS = `m.id, m.tenant_id, m.course_id, m.position, m.title, m.kind, m.duration_minutes, m.required`;
+const MODULE_COLUMNS = `m.id, m.tenant_id, m.course_id, m.position, m.title, m.kind, m.duration_minutes, m.required, m.assessment_id`;
 
 /**
  * The synthetic `Database` shell handed to the pure domain functions.
@@ -936,6 +937,24 @@ export type CreateOptions = {
   /** Skip the ADR-001 role check. Only a migration/test harness should ever pass true. */
   skipRoleCheck?: boolean;
 };
+
+/**
+ * A repository bound to a transaction that is ALREADY open.
+ *
+ * `PostgresPersistence.read/write` open their own transaction, which is right
+ * for a request that does one thing. It is wrong for a caller that must do
+ * several things atomically — finalizing an assessment attempt and recording
+ * the course-module completion it satisfies have to commit together or not at
+ * all, and nesting `withTenantTransaction` inside another would silently give
+ * two commit points.
+ *
+ * The client passed here must already carry the tenant context
+ * (`withTenantTransaction` sets it), so this adds no privilege of its own: RLS
+ * governs every statement exactly as it does through the ordinary entry points.
+ */
+export function repositoryOnClient(client: Queryable, scope: ActorScope): OsaRepository {
+  return new PostgresRepository(client, scope);
+}
 
 /**
  * Returns null — never throws — when the `pg` driver is not installed or no
