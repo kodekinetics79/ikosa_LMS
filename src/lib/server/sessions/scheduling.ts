@@ -31,6 +31,7 @@ import {
   appendAssessmentAudit, iso, isoOrNull, num, numOrNull, readTx, scopePaths, writeTx,
 } from "../assessment/runtime";
 import { recordAttendanceCourseProgress } from "./attendance-completion";
+import { LIVE_PROVIDERS, isLiveProvider, joinUrlFor, roomFor, type LiveProvider } from "./providers";
 
 export const SESSION_STATUSES = ["scheduled", "live", "completed", "cancelled"] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
@@ -52,11 +53,14 @@ export type LiveSession = {
   endsAt: string;
   timeZone: string;
   /**
-   * Always 'manual'. Kept in the payload so a client never has to assume it,
-   * and so the day an integration exists the change is visible in the data
-   * rather than implied by a UI label.
+   * Where the class is actually held. 'manual' means the platform hosts
+   * nothing and a human records who turned up; 'jitsi' means the platform
+   * issues a real room. Zoom and Teams are absent because both need a
+   * registered OAuth application, and a value the code cannot honour is a
+   * claim rather than a field.
    */
-  provider: "manual";
+  provider: LiveProvider;
+  /** Empty for 'manual'. Derived from the room, never stored twice. */
   joinUrl: string;
   capacity: number | null;
   status: SessionStatus;
@@ -108,6 +112,12 @@ export type CreateSessionInput = {
   startsAt: string;
   endsAt: string;
   timeZone?: string;
+  /**
+   * Where to hold it. 'manual' (the default) means the platform hosts nothing.
+   * 'jitsi' means it issues a real room — see sessions/providers.
+   */
+  provider?: string;
+  /** Only meaningful for a manual session; a hosted one is issued its own. */
   joinUrl?: string;
   capacity?: number | null;
 };
@@ -248,8 +258,13 @@ function toSession(row: Record<string, unknown>): LiveSession {
     startsAt: iso(row.starts_at),
     endsAt: iso(row.ends_at),
     timeZone: String(row.time_zone),
-    provider: "manual",
-    joinUrl: String(row.join_url ?? ""),
+    provider: (isLiveProvider(row.provider) ? row.provider : "manual"),
+    // Composed from the stored room rather than stored alongside it: a URL kept
+    // in a second column drifts the moment the instance domain changes, and a
+    // stale join link is worse than none.
+    joinUrl: isLiveProvider(row.provider) && row.provider !== "manual"
+      ? joinUrlFor(row.provider, String(row.provider_room ?? ""))
+      : String(row.join_url ?? ""),
     capacity: numOrNull(row.capacity),
     status: String(row.status) as SessionStatus,
     createdBy: String(row.created_by),
@@ -272,7 +287,8 @@ const toSummary = (row: Record<string, unknown>): SessionSummary => ({
  */
 const SESSION_SELECT = `
   SELECT s.id, s.org_unit_id, s.course_id, s.module_id, s.title, s.description,
-         s.instructor_user_id, s.starts_at, s.ends_at, s.time_zone, s.join_url,
+         s.instructor_user_id, s.starts_at, s.ends_at, s.time_zone,
+         s.provider, s.provider_room, s.join_url,
          s.capacity, s.status, s.created_by, s.created_at, s.updated_at,
          c.title AS course_title, iu.display_name AS instructor_name,
          att.registered_count, att.attended_count
@@ -490,9 +506,11 @@ function normalizeUserIds(userIds: readonly string[], label: string): string[] {
 /**
  * Schedules a session.
  *
- * `provider` is never taken from the caller: 'manual' is the only value the
- * schema admits, and accepting the field would invite a client to send 'zoom'
- * and believe a meeting had been created.
+ * `provider` is validated against the adapters that exist, never trusted: a
+ * client sending 'zoom' must be refused rather than left believing a meeting
+ * was created. For 'jitsi' the room is derived server-side from the new row's
+ * id under the deployment secret, so it is stable, unguessable, and never
+ * chosen by the caller.
  *
  * A course owned ABOVE the scheduler is accepted, using the same visibility
  * rule delivery uses. Courses are authored centrally and run locally; a
@@ -551,12 +569,22 @@ export async function createSession(
     const instructorUserId = input.instructorUserId ? storageId(input.instructorUserId, "Instructor") : null;
     if (instructorUserId) await assertUsersWritable(client, principal, [instructorUserId], null);
 
+    const requestedProvider = input.provider ?? "manual";
+    if (!isLiveProvider(requestedProvider)) {
+      throw outOfRange(`This deployment can host a session on: ${LIVE_PROVIDERS.join(", ")}. Zoom and Teams need a registered application and are not connected.`);
+    }
+    if (requestedProvider !== "manual" && joinUrl) {
+      // The platform issues the room for a hosted session. A caller-supplied URL
+      // would let somebody point a course's learners anywhere.
+      throw conflict("A hosted session's join link is issued by the platform. Leave it blank, or choose a manual session to record your own link.");
+    }
+
     const { rows } = await client.query(
       `INSERT INTO osa.live_sessions
          (tenant_id, org_unit_id, course_id, module_id, title, description, instructor_user_id,
-          starts_at, ends_at, time_zone, provider, join_url, capacity, status, created_by)
+          starts_at, ends_at, time_zone, provider, provider_room, join_url, capacity, status, created_by)
        SELECT ou.tenant_id, $1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid,
-              $7::timestamptz, $8::timestamptz, $9, 'manual', $10, $11::integer, 'scheduled', $12::uuid
+              $7::timestamptz, $8::timestamptz, $9, 'manual', '', $10, $11::integer, 'scheduled', $12::uuid
          FROM osa.org_units ou WHERE ou.id = $1::uuid
        RETURNING *`,
       [
@@ -565,10 +593,23 @@ export async function createSession(
         timeZone, joinUrl, capacity, principalUserId(principal),
       ],
     );
-    const created = rows[0];
+    let created = rows[0];
+
+    // The room is derived from the row's OWN id, so it cannot be known before
+    // the insert. Written in the same transaction, so a hosted session is never
+    // visible without its room — which the schema's
+    // live_sessions_room_matches_provider CHECK also refuses.
+    if (requestedProvider !== "manual") {
+      const room = roomFor(requestedProvider, String(created.id));
+      const { rows: hosted } = await client.query(
+        "UPDATE osa.live_sessions SET provider = $2, provider_room = $3, updated_at = now() WHERE id = $1::uuid RETURNING *",
+        [String(created.id), requestedProvider, room],
+      );
+      created = hosted[0];
+    }
     await appendAssessmentAudit(client, principal, requestId, "session.create", "live_session", String(created.id), {
       title, orgUnitId, courseId, moduleId, startsAt: iso(created.starts_at), endsAt: iso(created.ends_at),
-      timeZone, capacity, instructorUserId,
+      timeZone, capacity, instructorUserId, provider: requestedProvider,
     });
     return readSummary(client, String(created.id));
   });

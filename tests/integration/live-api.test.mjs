@@ -1067,6 +1067,71 @@ describe('assessment engine', () => {
     assert.equal(row.evidenceId ?? null, null, 'attendance is not a back door to competence evidence');
   });
 
+  test('a hosted session issues its own unguessable room', async (t) => {
+    if (!world.postgres) return t.skip(skipReason);
+
+    const starts = new Date(Date.now() + 86_400_000).toISOString();
+    const ends = new Date(Date.now() + 86_400_000 + 3_600_000).toISOString();
+
+    // A provider with no adapter must be refused, not accepted and quietly
+    // downgraded — a scheduler who asked for Zoom and got a manual session would
+    // tell a cohort to expect a meeting that does not exist.
+    for (const provider of ['zoom', 'teams', 'webex', 'anything']) {
+      const refused = await call('/api/live-sessions', {
+        session: world.admin, method: 'POST',
+        body: { orgUnitId: world.admin.user.orgUnitId, title: `Bad ${provider}`, description: '', startsAt: starts, endsAt: ends, timeZone: 'UTC', provider }
+      });
+      assert.equal(refused.response.status, 400, `${provider}: ${JSON.stringify(refused.body)}`);
+      assert.match(refused.body.error, /manual, jitsi/);
+    }
+
+    const hosted = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: `Hosted class ${Date.now()}`, description: 'Held on the platform', startsAt: starts, endsAt: ends, timeZone: 'Europe/London', provider: 'jitsi' }
+    });
+    assert.equal(hosted.response.status, 201, JSON.stringify(hosted.body));
+    assert.equal(hosted.body.provider, 'jitsi');
+    assert.ok(hosted.body.joinUrl.startsWith('https://'), 'a hosted session carries a real join URL');
+    // The room must not be derivable from anything the learner already has. An
+    // id that appears in URLs, payloads and audit exports would make the room a
+    // door anyone who has seen it can open.
+    assert.equal(hosted.body.joinUrl.includes(hosted.body.id), false, 'the room is not the session id');
+    assert.match(hosted.body.joinUrl, /\/ik-[A-Za-z0-9_-]{32}#config\.prejoinPageEnabled=true$/);
+
+    // Stable across reads: a room that moved between page loads would scatter a
+    // class across two calls.
+    const reread = await call(`/api/live-sessions?sessionId=${hosted.body.id}`, { session: world.admin });
+    assert.equal(reread.response.status, 200, JSON.stringify(reread.body));
+    assert.equal(reread.body.session.joinUrl, hosted.body.joinUrl);
+
+    // Two sessions never share a room.
+    const second = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: `Hosted class two ${Date.now()}`, description: '', startsAt: starts, endsAt: ends, timeZone: 'UTC', provider: 'jitsi' }
+    });
+    assert.notEqual(second.body.joinUrl, hosted.body.joinUrl);
+
+    // The platform issues the room for a hosted session; a caller-supplied link
+    // would let somebody point a course's learners anywhere.
+    const hijack = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: 'Hijack', description: '', startsAt: starts, endsAt: ends, timeZone: 'UTC', provider: 'jitsi', joinUrl: 'https://evil.example/room' }
+    });
+    assert.equal(hijack.response.status, 409, JSON.stringify(hijack.body));
+
+    // A manual session still carries no room and claims no call.
+    const manual = await call('/api/live-sessions', {
+      session: world.admin, method: 'POST',
+      body: { orgUnitId: world.admin.user.orgUnitId, title: `Manual ${Date.now()}`, description: '', startsAt: starts, endsAt: ends, timeZone: 'UTC' }
+    });
+    assert.equal(manual.body.provider, 'manual');
+    assert.equal(manual.body.joinUrl, '');
+
+    // And a hosted session is still invisible to another tenant.
+    const foreign = await call('/api/live-sessions', { session: world.gulfAdmin });
+    assert.equal(foreign.body.items.some((item) => item.id === hosted.body.id), false);
+  });
+
   test('an author cannot reach another tenant, and a learner cannot reach another learner', async (t) => {
     if (!world.postgres) return t.skip(skipReason);
 

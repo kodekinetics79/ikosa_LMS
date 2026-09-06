@@ -98,6 +98,10 @@ export async function POST(request: Request): Promise<Response> {
       startsAt: requiredString(body, "startsAt", 60),
       endsAt: requiredString(body, "endsAt", 60),
       timeZone: optionalText(body, "timeZone", 100) ?? "UTC",
+      // Validated in the store against the adapters that actually exist, so a
+      // client sending "zoom" is refused rather than left believing a meeting
+      // was created.
+      provider: optionalText(body, "provider", 20) ?? "manual",
       joinUrl: optionalText(body, "joinUrl", 2000) ?? "",
       capacity: optionalNumber(body, "capacity") ?? null,
     }, rid);
